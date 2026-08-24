@@ -27,6 +27,18 @@ class DomesticLayout(str, Enum):
     CORNERS = "II"
 
 
+class FaceOrientation(int, Enum):
+    """Допустимая ориентация полной фотографии лицевой стороны.
+
+    На сортировщике письмо может попасть под камеру в штатной ориентации
+    либо быть развёрнуто на 180 градусов. После perspective rectification
+    обе гипотезы должны быть проверены до применения координат ГОСТ.
+    """
+
+    DEG_0 = 0
+    DEG_180 = 180
+
+
 @dataclass(frozen=True, slots=True)
 class EnvelopeSpec:
     code: EnvelopeFormat
@@ -59,9 +71,19 @@ class FormatCandidate:
 class RectMM:
     """Прямоугольник в системе координат лицевой стороны конверта, мм.
 
-    Начало координат: левый верхний угол после перспективного выравнивания.
-    X направлена вправо, Y — вниз.
+    Начало координат: левый верхний угол после определения канонической
+    ориентации лицевой стороны. X направлена вправо, Y — вниз.
     """
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+@dataclass(frozen=True, slots=True)
+class RectNormalized:
+    """Прямоугольник в нормализованных координатах 0..1."""
 
     x: float
     y: float
@@ -101,6 +123,9 @@ def candidate_formats_by_aspect_ratio(
     Важно: функция НЕ выбирает единственный формат. C6/C5/C4/B4 имеют
     близкие отношения сторон, поэтому окончательная идентификация должна
     выполняться по геометрии стандартных элементов после rectification.
+
+    Отношение сторон инвариантно к повороту на 180 градусов, поэтому этот
+    этап выполняется до определения ориентации лицевой стороны.
     """
 
     if width_px <= 0 or height_px <= 0:
@@ -121,8 +146,36 @@ def candidate_formats_by_aspect_ratio(
     return sorted(candidates, key=lambda item: item.ratio_error)
 
 
+def rotate_normalized_rect_180(rect: RectNormalized) -> RectNormalized:
+    """Переводит ROI между гипотезами ориентации 0° и 180°.
+
+    Прямоугольник остаётся осевым, поэтому ширина и высота не меняются.
+    Функция является собственной обратной: двойное применение возвращает
+    исходный ROI.
+    """
+
+    values = (rect.x, rect.y, rect.width, rect.height)
+    if not all(0.0 <= value <= 1.0 for value in values):
+        raise ValueError("Нормализованные координаты должны лежать в диапазоне 0..1")
+    if rect.width <= 0.0 or rect.height <= 0.0:
+        raise ValueError("Ширина и высота должны быть > 0")
+    if rect.x + rect.width > 1.0 or rect.y + rect.height > 1.0:
+        raise ValueError("Прямоугольник выходит за границы 0..1")
+
+    return RectNormalized(
+        x=1.0 - rect.x - rect.width,
+        y=1.0 - rect.y - rect.height,
+        width=rect.width,
+        height=rect.height,
+    )
+
+
 def mm_to_normalized(rect: RectMM, spec: EnvelopeSpec) -> tuple[float, float, float, float]:
-    """Переводит прямоугольник из миллиметров ГОСТ в нормализованные 0..1 координаты."""
+    """Переводит прямоугольник из миллиметров ГОСТ в нормализованные 0..1 координаты.
+
+    Вызывать только после определения ориентации лицевой стороны. Координаты
+    ГОСТ всегда относятся к канонической ориентации 0°.
+    """
 
     if rect.x < 0 or rect.y < 0 or rect.width <= 0 or rect.height <= 0:
         raise ValueError("Некорректный прямоугольник")
