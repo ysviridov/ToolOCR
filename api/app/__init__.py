@@ -1,0 +1,1 @@
+"""HTTP API проекта ToolOCR."""
