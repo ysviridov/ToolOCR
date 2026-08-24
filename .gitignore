@@ -1,0 +1,6 @@
+.env
+data/incoming/*.zip
+!data/incoming/.gitkeep
+__pycache__/
+*.pyc
+.pytest_cache/
