@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
+from statistics import median
 from typing import Sequence
 
 import cv2
@@ -13,8 +14,10 @@ from .gost_r_51506_99 import ENVELOPE_SPECS, EnvelopeFormat, EnvelopeSpec
 from .layout import order_quad
 
 
-CALIBRATION_VERSION = 1
+CALIBRATION_ENTRY_VERSION = 1
+CALIBRATION_SET_VERSION = 2
 DEFAULT_SIZE_TOLERANCE_MM = 8.0
+DEFAULT_CONSENSUS_SPREAD_MM = 12.0
 
 
 class CameraCalibrationError(RuntimeError):
@@ -44,6 +47,22 @@ class MetricMeasurement:
     right_height_mm: float
     width_exact: bool
     height_exact: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationMeasurement:
+    reference_format: str
+    measurement: MetricMeasurement
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationConsensus:
+    measurement: MetricMeasurement
+    reference_formats: tuple[str, ...]
+    width_spread_mm: float
+    height_spread_mm: float
+    consistent: bool
+    per_reference: tuple[CalibrationMeasurement, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,13 +106,7 @@ def build_plane_calibration(
     spec: EnvelopeSpec,
     standard: str,
 ) -> PlaneCalibration:
-    """Строит homography image(normalized) -> mm по отправлению известного формата.
-
-    Калибровочный конверт должен полностью попадать в кадр и лежать длинной
-    стороной примерно горизонтально. Поскольку homography строится в
-    нормализованных координатах изображения, одинаковый FOV можно использовать
-    при другом разрешении с тем же отношением сторон.
-    """
+    """Строит homography image(normalized) -> mm по отправлению известного формата."""
 
     ordered = order_quad(quad)
     tl, tr, br, bl = ordered
@@ -123,7 +136,7 @@ def build_plane_calibration(
         raise CameraCalibrationError("Не удалось построить устойчивую homography")
 
     return PlaneCalibration(
-        version=CALIBRATION_VERSION,
+        version=CALIBRATION_ENTRY_VERSION,
         standard=standard,
         reference_format=spec.code.value,
         reference_width_mm=spec.width_mm,
@@ -168,11 +181,15 @@ def calibration_from_dict(payload: dict) -> PlaneCalibration:
             homography_norm_to_mm=matrix,
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise CameraCalibrationError(f"Некорректный файл калибровки: {exc}") from exc
+        raise CameraCalibrationError(f"Некорректная запись калибровки: {exc}") from exc
 
-    if calibration.version != CALIBRATION_VERSION:
+    if calibration.version != CALIBRATION_ENTRY_VERSION:
         raise CameraCalibrationError(
-            f"Неподдерживаемая версия калибровки: {calibration.version}"
+            f"Неподдерживаемая версия записи калибровки: {calibration.version}"
+        )
+    if calibration.reference_format not in {item.value for item in EnvelopeFormat}:
+        raise CameraCalibrationError(
+            f"Неизвестный reference_format: {calibration.reference_format}"
         )
     if not np.isfinite(calibration.homography_norm_to_mm).all():
         raise CameraCalibrationError("Матрица калибровки содержит NaN/Inf")
@@ -181,7 +198,60 @@ def calibration_from_dict(payload: dict) -> PlaneCalibration:
     return calibration
 
 
-def load_plane_calibration(path: str | Path) -> PlaneCalibration:
+def calibration_set_to_dict(calibrations: Sequence[PlaneCalibration]) -> dict:
+    items = tuple(calibrations)
+    if not items:
+        raise CameraCalibrationError("Нельзя сохранить пустой набор калибровок")
+    standards = {item.standard for item in items}
+    if len(standards) != 1:
+        raise CameraCalibrationError("Калибровки относятся к разным стандартам")
+    by_format = {item.reference_format: calibration_to_dict(item) for item in items}
+    if len(by_format) != len(items):
+        raise CameraCalibrationError("В наборе есть повторяющиеся reference_format")
+    return {
+        "version": CALIBRATION_SET_VERSION,
+        "standard": items[0].standard,
+        "calibrations": by_format,
+    }
+
+
+def _parse_calibration_set(payload: dict) -> tuple[PlaneCalibration, ...]:
+    # Backward compatibility: старый v1-файл содержал одну запись напрямую.
+    if "homography_norm_to_mm" in payload and "reference_format" in payload:
+        return (calibration_from_dict(payload),)
+
+    try:
+        version = int(payload["version"])
+        standard = str(payload["standard"])
+        raw = payload["calibrations"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CameraCalibrationError(f"Некорректный файл калибровок: {exc}") from exc
+
+    if version != CALIBRATION_SET_VERSION:
+        raise CameraCalibrationError(f"Неподдерживаемая версия набора калибровок: {version}")
+    if not isinstance(raw, dict) or not raw:
+        raise CameraCalibrationError("Поле calibrations должно быть непустым объектом")
+
+    calibrations: list[PlaneCalibration] = []
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            raise CameraCalibrationError(f"Некорректная запись calibrations.{key}")
+        calibration = calibration_from_dict(value)
+        if calibration.reference_format != str(key):
+            raise CameraCalibrationError(
+                f"Ключ {key} не совпадает с reference_format={calibration.reference_format}"
+            )
+        if calibration.standard != standard:
+            raise CameraCalibrationError(
+                f"Калибровка {key} относится к другому стандарту: {calibration.standard}"
+            )
+        calibrations.append(calibration)
+
+    calibrations.sort(key=lambda item: item.reference_format)
+    return tuple(calibrations)
+
+
+def load_plane_calibrations(path: str | Path) -> tuple[PlaneCalibration, ...]:
     calibration_path = Path(path)
     try:
         payload = json.loads(calibration_path.read_text(encoding="utf-8"))
@@ -189,7 +259,24 @@ def load_plane_calibration(path: str | Path) -> PlaneCalibration:
         raise CameraCalibrationError(f"Файл калибровки не найден: {calibration_path}") from exc
     except json.JSONDecodeError as exc:
         raise CameraCalibrationError(f"Некорректный JSON калибровки: {exc}") from exc
-    return calibration_from_dict(payload)
+
+    calibrations = _parse_calibration_set(payload)
+    aspects = [item.image_aspect_ratio for item in calibrations]
+    if max(aspects) - min(aspects) > 0.002 * max(1.0, median(aspects)):
+        raise CameraCalibrationError(
+            "Калибровки имеют несовместимые FOV/отношения сторон изображения"
+        )
+    return calibrations
+
+
+def load_plane_calibration(path: str | Path) -> PlaneCalibration:
+    """Совместимость со старым API: допускается только один эталон."""
+    calibrations = load_plane_calibrations(path)
+    if len(calibrations) != 1:
+        raise CameraCalibrationError(
+            "В файле несколько калибровок; используйте load_plane_calibrations()"
+        )
+    return calibrations[0]
 
 
 def _validate_frame_geometry(
@@ -251,9 +338,6 @@ def measure_quad_mm(
     sides = frozenset(str(side).lower() for side in frame_contact_sides)
     width_exact = not bool({"left", "right"} & sides)
     height_exact = not bool({"top", "bottom"} & sides)
-
-    # При обрезке top/bottom ширина между боковыми кромками остаётся валидным
-    # метрическим признаком. Аналогично для высоты при обрезке left/right.
     width = (top + bottom) / 2.0
     height = (left + right) / 2.0
 
@@ -269,6 +353,64 @@ def measure_quad_mm(
     )
 
 
+def measure_quad_mm_consensus(
+    calibrations: Sequence[PlaneCalibration],
+    quad: np.ndarray,
+    *,
+    image_width_px: int,
+    image_height_px: int,
+    frame_contact_sides: Sequence[str] = (),
+    max_spread_mm: float = DEFAULT_CONSENSUS_SPREAD_MM,
+) -> CalibrationConsensus:
+    items = tuple(calibrations)
+    if not items:
+        raise CameraCalibrationError("Нет доступных калибровок")
+    if max_spread_mm <= 0:
+        raise ValueError("max_spread_mm должен быть > 0")
+
+    per_reference = tuple(
+        CalibrationMeasurement(
+            reference_format=calibration.reference_format,
+            measurement=measure_quad_mm(
+                calibration,
+                quad,
+                image_width_px=image_width_px,
+                image_height_px=image_height_px,
+                frame_contact_sides=frame_contact_sides,
+            ),
+        )
+        for calibration in items
+    )
+    measurements = [item.measurement for item in per_reference]
+
+    def med(name: str) -> float:
+        return round(float(median(getattr(item, name) for item in measurements)), 3)
+
+    consensus = MetricMeasurement(
+        width_mm=med("width_mm"),
+        height_mm=med("height_mm"),
+        top_width_mm=med("top_width_mm"),
+        bottom_width_mm=med("bottom_width_mm"),
+        left_height_mm=med("left_height_mm"),
+        right_height_mm=med("right_height_mm"),
+        width_exact=all(item.width_exact for item in measurements),
+        height_exact=all(item.height_exact for item in measurements),
+    )
+    widths = [item.width_mm for item in measurements]
+    heights = [item.height_mm for item in measurements]
+    width_spread = round(max(widths) - min(widths), 3)
+    height_spread = round(max(heights) - min(heights), 3)
+
+    return CalibrationConsensus(
+        measurement=consensus,
+        reference_formats=tuple(item.reference_format for item in per_reference),
+        width_spread_mm=width_spread,
+        height_spread_mm=height_spread,
+        consistent=width_spread <= max_spread_mm and height_spread <= max_spread_mm,
+        per_reference=per_reference,
+    )
+
+
 def _dimension_score(
     observed_mm: float,
     expected_mm: float,
@@ -281,10 +423,6 @@ def _dimension_score(
         score = math.exp(-0.5 * (error / tolerance_mm) ** 2)
         return score, error, "exact"
 
-    # При контакте с границей кадра измерение является нижней оценкой размера:
-    # ожидаемый размер не может быть заметно меньше наблюдаемого. Более крупные
-    # форматы не штрафуются по обрезанному измерению и должны различаться по
-    # другой, полностью наблюдаемой стороне.
     if observed_mm <= expected_mm + tolerance_mm:
         return 1.0, max(0.0, observed_mm - expected_mm), "lower_bound"
     overshoot = observed_mm - expected_mm
