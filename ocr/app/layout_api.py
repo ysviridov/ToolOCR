@@ -126,6 +126,19 @@ def _orientation_evidence_to_dict(evidence: Any) -> dict[str, Any]:
         "address_layout": evidence.address_layout,
         "text_direction": evidence.text_direction,
         "content_orientation": evidence.content_orientation,
+        "base_score": evidence.base_score,
+        "contrast": {
+            "postage_delta": evidence.postage_delta,
+            "code_stamp_delta": evidence.code_stamp_delta,
+            "barcode_delta": evidence.barcode_delta,
+            "address_delta": evidence.address_delta,
+            "text_delta": evidence.text_delta,
+            "bonus": evidence.contrast_bonus,
+        },
+        "agreement": {
+            "channels": evidence.agreement_channels,
+            "bonus": evidence.agreement_bonus,
+        },
         "score": evidence.score,
     }
 
