@@ -36,6 +36,10 @@ class PlaneCalibration:
     image_height_px: int
     image_aspect_ratio: float
     homography_norm_to_mm: np.ndarray
+    reference_width_px: float | None = None
+    reference_height_px: float | None = None
+    px_per_mm_x: float | None = None
+    px_per_mm_y: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +94,17 @@ def _distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)))
 
 
+def _quad_pixel_dimensions(quad: np.ndarray) -> tuple[float, float, float, float, float, float]:
+    tl, tr, br, bl = order_quad(quad)
+    top = _distance(tl, tr)
+    bottom = _distance(bl, br)
+    left = _distance(tl, bl)
+    right = _distance(tr, br)
+    width = (top + bottom) / 2.0
+    height = (left + right) / 2.0
+    return width, height, top, bottom, left, right
+
+
 def _normalize_points(points: np.ndarray, width_px: int, height_px: int) -> np.ndarray:
     if width_px <= 0 or height_px <= 0:
         raise ValueError("Размер изображения должен быть положительным")
@@ -107,16 +122,15 @@ def build_plane_calibration(
     spec: EnvelopeSpec,
     standard: str,
 ) -> PlaneCalibration:
-    """Строит homography image(normalized) -> mm по отправлению известного формата."""
+    """Строит калибровку плоскости и pixel-scale по эталону известного размера.
+
+    Homography сохраняется для обратной совместимости и перспективной геометрии.
+    Для определения физического формата используется также px/mm самого quad:
+    он не зависит от количества черного поля вокруг письма и ширины JPEG crop.
+    """
 
     ordered = order_quad(quad)
-    tl, tr, br, bl = ordered
-    top = _distance(tl, tr)
-    bottom = _distance(bl, br)
-    left = _distance(tl, bl)
-    right = _distance(tr, br)
-    observed_width = (top + bottom) / 2.0
-    observed_height = (left + right) / 2.0
+    observed_width, observed_height, _, _, _, _ = _quad_pixel_dimensions(ordered)
     if observed_width <= observed_height:
         raise CameraCalibrationError(
             "Калибровочный эталон должен лежать длинной стороной горизонтально"
@@ -146,10 +160,15 @@ def build_plane_calibration(
         image_height_px=int(image_height_px),
         image_aspect_ratio=float(image_width_px) / float(image_height_px),
         homography_norm_to_mm=matrix.astype(np.float64),
+        reference_width_px=observed_width,
+        reference_height_px=observed_height,
+        px_per_mm_x=observed_width / spec.width_mm,
+        px_per_mm_y=observed_height / spec.height_mm,
     )
 
 
 def calibration_to_dict(calibration: PlaneCalibration) -> dict:
+    px_x, px_y, ref_w_px, ref_h_px = _pixel_scales(calibration)
     return {
         "version": calibration.version,
         "standard": calibration.standard,
@@ -159,6 +178,11 @@ def calibration_to_dict(calibration: PlaneCalibration) -> dict:
         "image_width_px": calibration.image_width_px,
         "image_height_px": calibration.image_height_px,
         "image_aspect_ratio": round(calibration.image_aspect_ratio, 9),
+        "reference_width_px": round(ref_w_px, 4),
+        "reference_height_px": round(ref_h_px, 4),
+        "px_per_mm_x": round(px_x, 9),
+        "px_per_mm_y": round(px_y, 9),
+        "metric_mode": "quad_pixel_scale",
         "homography_norm_to_mm": [
             [round(float(value), 12) for value in row]
             for row in calibration.homography_norm_to_mm
@@ -180,6 +204,26 @@ def calibration_from_dict(payload: dict) -> PlaneCalibration:
             image_height_px=int(payload["image_height_px"]),
             image_aspect_ratio=float(payload["image_aspect_ratio"]),
             homography_norm_to_mm=matrix,
+            reference_width_px=(
+                float(payload["reference_width_px"])
+                if payload.get("reference_width_px") is not None
+                else None
+            ),
+            reference_height_px=(
+                float(payload["reference_height_px"])
+                if payload.get("reference_height_px") is not None
+                else None
+            ),
+            px_per_mm_x=(
+                float(payload["px_per_mm_x"])
+                if payload.get("px_per_mm_x") is not None
+                else None
+            ),
+            px_per_mm_y=(
+                float(payload["px_per_mm_y"])
+                if payload.get("px_per_mm_y") is not None
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CameraCalibrationError(f"Некорректная запись калибровки: {exc}") from exc
@@ -196,7 +240,55 @@ def calibration_from_dict(payload: dict) -> PlaneCalibration:
         raise CameraCalibrationError("Матрица калибровки содержит NaN/Inf")
     if calibration.image_width_px <= 0 or calibration.image_height_px <= 0:
         raise CameraCalibrationError("Некорректное разрешение калибровки")
+
+    # Проверяем/восстанавливаем crop-инвариантный scale даже для старых v1 JSON.
+    _pixel_scales(calibration)
     return calibration
+
+
+def _pixel_scales(calibration: PlaneCalibration) -> tuple[float, float, float, float]:
+    if (
+        calibration.px_per_mm_x is not None
+        and calibration.px_per_mm_y is not None
+        and calibration.reference_width_px is not None
+        and calibration.reference_height_px is not None
+    ):
+        values = (
+            float(calibration.px_per_mm_x),
+            float(calibration.px_per_mm_y),
+            float(calibration.reference_width_px),
+            float(calibration.reference_height_px),
+        )
+        if all(math.isfinite(value) and value > 0 for value in values):
+            return values
+
+    # Старые файлы не содержат pixel-scale. Восстанавливаем исходный quad через
+    # inverse homography: world(mm) -> normalized image -> calibration pixels.
+    try:
+        inverse = np.linalg.inv(calibration.homography_norm_to_mm)
+    except np.linalg.LinAlgError as exc:
+        raise CameraCalibrationError("Необратимая homography калибровки") from exc
+
+    world = np.array(
+        [
+            [0.0, 0.0],
+            [calibration.reference_width_mm, 0.0],
+            [calibration.reference_width_mm, calibration.reference_height_mm],
+            [0.0, calibration.reference_height_mm],
+        ],
+        dtype=np.float64,
+    )
+    normalized = cv2.perspectiveTransform(world.reshape(1, 4, 2), inverse)[0]
+    pixels = normalized.copy()
+    pixels[:, 0] *= float(calibration.image_width_px)
+    pixels[:, 1] *= float(calibration.image_height_px)
+    width_px, height_px, _, _, _, _ = _quad_pixel_dimensions(pixels)
+    px_x = width_px / calibration.reference_width_mm
+    px_y = height_px / calibration.reference_height_mm
+    values = (px_x, px_y, width_px, height_px)
+    if not all(math.isfinite(value) and value > 0 for value in values):
+        raise CameraCalibrationError("Не удалось восстановить pixel-scale калибровки")
+    return values
 
 
 def calibration_set_to_dict(calibrations: Sequence[PlaneCalibration]) -> dict:
@@ -217,7 +309,6 @@ def calibration_set_to_dict(calibrations: Sequence[PlaneCalibration]) -> dict:
 
 
 def _parse_calibration_set(payload: dict) -> tuple[PlaneCalibration, ...]:
-    # Backward compatibility: старый v1-файл содержал одну запись напрямую.
     if "homography_norm_to_mm" in payload and "reference_format" in payload:
         return (calibration_from_dict(payload),)
 
@@ -253,13 +344,6 @@ def _parse_calibration_set(payload: dict) -> tuple[PlaneCalibration, ...]:
 
 
 def load_plane_calibrations(path: str | Path) -> tuple[PlaneCalibration, ...]:
-    """Загружает весь набор калибровок.
-
-    Разные записи могут относиться к разным FOV/crop. Это нормально для
-    сортировщика: совместимая группа выбирается уже для конкретного входного
-    кадра в `measure_quad_mm_consensus()`.
-    """
-
     calibration_path = Path(path)
     try:
         payload = json.loads(calibration_path.read_text(encoding="utf-8"))
@@ -267,13 +351,10 @@ def load_plane_calibrations(path: str | Path) -> tuple[PlaneCalibration, ...]:
         raise CameraCalibrationError(f"Файл калибровки не найден: {calibration_path}") from exc
     except json.JSONDecodeError as exc:
         raise CameraCalibrationError(f"Некорректный JSON калибровки: {exc}") from exc
-
     return _parse_calibration_set(payload)
 
 
 def load_plane_calibration(path: str | Path) -> PlaneCalibration:
-    """Совместимость со старым API: допускается только один эталон."""
-
     calibrations = load_plane_calibrations(path)
     if len(calibrations) != 1:
         raise CameraCalibrationError(
@@ -301,21 +382,18 @@ def select_calibrations_for_frame(
     image_height_px: int,
     aspect_tolerance: float = DEFAULT_FRAME_ASPECT_TOLERANCE,
 ) -> tuple[PlaneCalibration, ...]:
-    """Выбирает калибровки, совместимые с FOV/crop текущего изображения."""
-
+    """Legacy helper для homography-режима; metric consensus его не использует."""
     if aspect_tolerance <= 0:
         raise ValueError("aspect_tolerance должен быть > 0")
-    items = tuple(calibrations)
-    compatible = tuple(
+    return tuple(
         item
-        for item in items
+        for item in calibrations
         if _frame_aspect_error(
             item,
             image_width_px=image_width_px,
             image_height_px=image_height_px,
         ) <= aspect_tolerance
     )
-    return compatible
 
 
 def _validate_frame_geometry(
@@ -345,6 +423,7 @@ def map_image_points_to_mm(
     image_width_px: int,
     image_height_px: int,
 ) -> np.ndarray:
+    """Legacy homography mapping; требует неизменного полного FOV."""
     _validate_frame_geometry(
         calibration,
         image_width_px=image_width_px,
@@ -366,6 +445,7 @@ def measure_quad_mm(
     image_height_px: int,
     frame_contact_sides: Sequence[str] = (),
 ) -> MetricMeasurement:
+    """Legacy homography measurement для совместимости с существующими тестами."""
     points_mm = map_image_points_to_mm(
         calibration,
         order_quad(quad),
@@ -377,22 +457,42 @@ def measure_quad_mm(
     bottom = _distance(bl, br)
     left = _distance(tl, bl)
     right = _distance(tr, br)
-
     sides = frozenset(str(side).lower() for side in frame_contact_sides)
-    width_exact = not bool({"left", "right"} & sides)
-    height_exact = not bool({"top", "bottom"} & sides)
-    width = (top + bottom) / 2.0
-    height = (left + right) / 2.0
-
     return MetricMeasurement(
-        width_mm=round(width, 3),
-        height_mm=round(height, 3),
+        width_mm=round((top + bottom) / 2.0, 3),
+        height_mm=round((left + right) / 2.0, 3),
         top_width_mm=round(top, 3),
         bottom_width_mm=round(bottom, 3),
         left_height_mm=round(left, 3),
         right_height_mm=round(right, 3),
-        width_exact=width_exact,
-        height_exact=height_exact,
+        width_exact=not bool({"left", "right"} & sides),
+        height_exact=not bool({"top", "bottom"} & sides),
+    )
+
+
+def measure_quad_mm_by_pixel_scale(
+    calibration: PlaneCalibration,
+    quad: np.ndarray,
+    *,
+    frame_contact_sides: Sequence[str] = (),
+) -> MetricMeasurement:
+    """Измеряет quad независимо от черных полей/crop полного JPEG."""
+    px_x, px_y, _, _ = _pixel_scales(calibration)
+    _, _, top_px, bottom_px, left_px, right_px = _quad_pixel_dimensions(quad)
+    top = top_px / px_x
+    bottom = bottom_px / px_x
+    left = left_px / px_y
+    right = right_px / px_y
+    sides = frozenset(str(side).lower() for side in frame_contact_sides)
+    return MetricMeasurement(
+        width_mm=round((top + bottom) / 2.0, 3),
+        height_mm=round((left + right) / 2.0, 3),
+        top_width_mm=round(top, 3),
+        bottom_width_mm=round(bottom, 3),
+        left_height_mm=round(left, 3),
+        right_height_mm=round(right, 3),
+        width_exact=not bool({"left", "right"} & sides),
+        height_exact=not bool({"top", "bottom"} & sides),
     )
 
 
@@ -406,37 +506,25 @@ def measure_quad_mm_consensus(
     max_spread_mm: float = DEFAULT_CONSENSUS_SPREAD_MM,
     aspect_tolerance: float = DEFAULT_FRAME_ASPECT_TOLERANCE,
 ) -> CalibrationConsensus:
-    all_items = tuple(calibrations)
-    if not all_items:
+    """Crop-инвариантный consensus по pixel-scale всех эталонов камеры.
+
+    `image_width_px/image_height_px` сохранены в сигнатуре для совместимости, но
+    полный размер JPEG больше не участвует в метрическом измерении. Это важно
+    для кадров 3720/3736/3752×2888 с разным количеством черного фона.
+    """
+    del image_width_px, image_height_px, aspect_tolerance
+    items = tuple(calibrations)
+    if not items:
         raise CameraCalibrationError("Нет доступных калибровок")
     if max_spread_mm <= 0:
         raise ValueError("max_spread_mm должен быть > 0")
 
-    items = select_calibrations_for_frame(
-        all_items,
-        image_width_px=image_width_px,
-        image_height_px=image_height_px,
-        aspect_tolerance=aspect_tolerance,
-    )
-    if not items:
-        observed = float(image_width_px) / float(image_height_px)
-        available = ", ".join(
-            f"{item.reference_format}:{item.image_aspect_ratio:.6f}"
-            for item in all_items
-        )
-        raise CameraCalibrationError(
-            "Нет калибровки для FOV/отношения сторон текущего кадра: "
-            f"current={observed:.6f}; available=[{available}]"
-        )
-
     per_reference = tuple(
         CalibrationMeasurement(
             reference_format=calibration.reference_format,
-            measurement=measure_quad_mm(
+            measurement=measure_quad_mm_by_pixel_scale(
                 calibration,
                 quad,
-                image_width_px=image_width_px,
-                image_height_px=image_height_px,
                 frame_contact_sides=frame_contact_sides,
             ),
         )
@@ -447,7 +535,7 @@ def measure_quad_mm_consensus(
     def med(name: str) -> float:
         return round(float(median(getattr(item, name) for item in measurements)), 3)
 
-    consensus = MetricMeasurement(
+    consensus_measurement = MetricMeasurement(
         width_mm=med("width_mm"),
         height_mm=med("height_mm"),
         top_width_mm=med("top_width_mm"),
@@ -463,7 +551,7 @@ def measure_quad_mm_consensus(
     height_spread = round(max(heights) - min(heights), 3)
 
     return CalibrationConsensus(
-        measurement=consensus,
+        measurement=consensus_measurement,
         reference_formats=tuple(item.reference_format for item in per_reference),
         width_spread_mm=width_spread,
         height_spread_mm=height_spread,
@@ -483,7 +571,6 @@ def _dimension_score(
     if exact:
         score = math.exp(-0.5 * (error / tolerance_mm) ** 2)
         return score, error, "exact"
-
     if observed_mm <= expected_mm + tolerance_mm:
         return 1.0, max(0.0, observed_mm - expected_mm), "lower_bound"
     overshoot = observed_mm - expected_mm
@@ -542,7 +629,6 @@ def match_format_by_metric(
     second_score = candidates[1].score if len(candidates) > 1 else 0.0
     margin = best.score - second_score
     resolved = best.score >= min_score and margin >= min_margin
-
     confidence = max(0.0, min(1.0, 0.72 * best.score + 0.28 * min(1.0, margin / 0.45)))
     return MetricFormatDecision(
         status="resolved" if resolved else "ambiguous",
