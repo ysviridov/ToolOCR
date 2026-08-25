@@ -1,11 +1,8 @@
 import numpy as np
-import pytest
 
 from ocr.app.camera_calibration import (
-    CameraCalibrationError,
     build_plane_calibration,
     measure_quad_mm_consensus,
-    select_calibrations_for_frame,
 )
 from ocr.app.gost_r_51506_99 import ENVELOPE_SPECS, GOST_ID, EnvelopeFormat
 
@@ -20,50 +17,69 @@ def _calibration(fmt, image_w, image_h, quad):
     )
 
 
-def test_multifov_set_selects_only_compatible_calibration():
+def _axis_aligned_quad(x, y, width, height):
+    return np.asarray(
+        [[x, y], [x + width, y], [x + width, y + height], [x, y + height]],
+        dtype=np.float32,
+    )
+
+
+def test_different_jpeg_crops_with_same_pixel_scale_use_all_calibrations():
+    # Два эталона сняты с разным размером полного JPEG, но само содержимое имеет
+    # одинаковый масштаб 4 px/mm. Это модель разного количества черного фона.
     c5 = _calibration(
         EnvelopeFormat.C5,
         1600,
         1200,
-        [[180, 180], [1420, 180], [1420, 1030], [180, 1030]],
+        _axis_aligned_quad(250, 180, 229 * 4, 162 * 4),
     )
     dl = _calibration(
         EnvelopeFormat.DL,
-        1000,
+        1180,
         1100,
-        [[100, 300], [900, 300], [900, 700], [100, 700]],
+        _axis_aligned_quad(120, 420, 220 * 4, 110 * 4),
     )
 
-    selected = select_calibrations_for_frame(
-        (c5, dl),
-        image_width_px=1000,
-        image_height_px=1100,
-    )
-    assert [item.reference_format for item in selected] == ["DL"]
-
+    runtime_dl = _axis_aligned_quad(80, 500, 220 * 4, 110 * 4)
     consensus = measure_quad_mm_consensus(
         (c5, dl),
-        np.asarray([[100, 300], [900, 300], [900, 700], [100, 700]], dtype=np.float32),
-        image_width_px=1000,
+        runtime_dl,
+        # Намеренно третий размер полного JPEG: metric mode его игнорирует.
+        image_width_px=1370,
         image_height_px=1100,
     )
-    assert consensus.reference_formats == ("DL",)
-    assert abs(consensus.measurement.width_mm - 220.0) < 0.5
-    assert abs(consensus.measurement.height_mm - 110.0) < 0.5
+
+    assert set(consensus.reference_formats) == {"C5", "DL"}
+    assert consensus.consistent is True
+    assert consensus.width_spread_mm < 0.1
+    assert consensus.height_spread_mm < 0.1
+    assert abs(consensus.measurement.width_mm - 220.0) < 0.1
+    assert abs(consensus.measurement.height_mm - 110.0) < 0.1
 
 
-def test_multifov_set_rejects_frame_without_matching_geometry():
+def test_real_upstream_resize_is_detected_as_inconsistent_scale():
+    # Здесь DL был реально resize-нут до 3 px/mm, а C5 остался 4 px/mm.
+    # Это уже не изменение черного crop и такой набор нельзя молча усреднять.
     c5 = _calibration(
         EnvelopeFormat.C5,
         1600,
         1200,
-        [[180, 180], [1420, 180], [1420, 1030], [180, 1030]],
+        _axis_aligned_quad(250, 180, 229 * 4, 162 * 4),
+    )
+    dl_resized = _calibration(
+        EnvelopeFormat.DL,
+        1000,
+        900,
+        _axis_aligned_quad(140, 300, 220 * 3, 110 * 3),
     )
 
-    with pytest.raises(CameraCalibrationError, match="Нет калибровки для FOV"):
-        measure_quad_mm_consensus(
-            (c5,),
-            np.asarray([[100, 300], [900, 300], [900, 700], [100, 700]], dtype=np.float32),
-            image_width_px=1000,
-            image_height_px=1100,
-        )
+    runtime_c5 = _axis_aligned_quad(100, 250, 229 * 4, 162 * 4)
+    consensus = measure_quad_mm_consensus(
+        (c5, dl_resized),
+        runtime_c5,
+        image_width_px=1500,
+        image_height_px=1200,
+    )
+
+    assert consensus.consistent is False
+    assert consensus.width_spread_mm > 12.0 or consensus.height_spread_mm > 12.0
