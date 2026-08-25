@@ -594,16 +594,110 @@ def _prepare_orientation_work(
     return work
 
 
-def _preliminary_orientation_scores(work: dict[int, _OrientationWork]) -> dict[int, float]:
-    scores = {0: 0.0, 180: 0.0}
-    for orientation, item in work.items():
-        content = _content_orientation_signal(item.barcode_layout, item.address_layout, 0.0)
+def _best_orientation_evidence(
+    work: dict[int, _OrientationWork],
+    text_scores: dict[int, float],
+) -> tuple[dict[int, float], dict[int, OrientationEvidence]]:
+    """Строит лучший абсолютный score каждой ориентации до contrast fusion."""
+    base_scores = {0: 0.0, 180: 0.0}
+    evidence: dict[int, OrientationEvidence] = {}
+
+    for degree in (0, 180):
+        item = work[degree]
+        text_direction = text_scores.get(degree, 0.0)
+        content_orientation = _content_orientation_signal(
+            item.barcode_layout,
+            item.address_layout,
+            text_direction,
+        )
         for _, postage, code_stamp, _ in item.format_features.values():
-            scores[orientation] = max(
-                scores[orientation],
-                _orientation_signal(postage, code_stamp, content),
+            score = _orientation_signal(postage, code_stamp, content_orientation)
+            if score > base_scores[degree] or degree not in evidence:
+                base_scores[degree] = score
+                evidence[degree] = OrientationEvidence(
+                    orientation_deg=degree,
+                    postage=postage,
+                    code_stamp=code_stamp,
+                    barcode_layout=item.barcode_layout,
+                    address_layout=item.address_layout,
+                    text_direction=text_direction,
+                    content_orientation=content_orientation,
+                    base_score=score,
+                    postage_delta=0.0,
+                    code_stamp_delta=0.0,
+                    barcode_delta=0.0,
+                    address_delta=0.0,
+                    text_delta=0.0,
+                    contrast_bonus=0.0,
+                    agreement_bonus=0.0,
+                    agreement_channels=0,
+                    score=score,
+                )
+
+        if degree not in evidence:
+            evidence[degree] = OrientationEvidence(
+                orientation_deg=degree,
+                postage=0.0,
+                code_stamp=0.0,
+                barcode_layout=item.barcode_layout,
+                address_layout=item.address_layout,
+                text_direction=text_direction,
+                content_orientation=content_orientation,
+                base_score=0.0,
+                postage_delta=0.0,
+                code_stamp_delta=0.0,
+                barcode_delta=0.0,
+                address_delta=0.0,
+                text_delta=0.0,
+                contrast_bonus=0.0,
+                agreement_bonus=0.0,
+                agreement_channels=0,
+                score=0.0,
             )
-    return scores
+
+    return base_scores, evidence
+
+
+def _apply_orientation_fusion(
+    base_scores: dict[int, float],
+    evidence: dict[int, OrientationEvidence],
+) -> tuple[dict[int, float], dict[int, OrientationEvidence]]:
+    fusion = _contrast_aware_fusion(base_scores, evidence)
+    scores: dict[int, float] = {}
+    fused: dict[int, OrientationEvidence] = {}
+    for degree in (0, 180):
+        adjustment = fusion[degree]
+        scores[degree] = adjustment.score
+        fused[degree] = replace(
+            evidence[degree],
+            base_score=round(base_scores[degree], 4),
+            postage=round(evidence[degree].postage, 4),
+            code_stamp=round(evidence[degree].code_stamp, 4),
+            barcode_layout=round(evidence[degree].barcode_layout, 4),
+            address_layout=round(evidence[degree].address_layout, 4),
+            text_direction=round(evidence[degree].text_direction, 4),
+            content_orientation=round(evidence[degree].content_orientation, 4),
+            postage_delta=round(adjustment.postage_delta, 4),
+            code_stamp_delta=round(adjustment.code_stamp_delta, 4),
+            barcode_delta=round(adjustment.barcode_delta, 4),
+            address_delta=round(adjustment.address_delta, 4),
+            text_delta=round(adjustment.text_delta, 4),
+            contrast_bonus=round(adjustment.contrast_bonus, 4),
+            agreement_bonus=round(adjustment.agreement_bonus, 4),
+            agreement_channels=adjustment.agreement_channels,
+            score=round(adjustment.score, 4),
+        )
+    return scores, fused
+
+
+def _orientation_is_resolved(
+    scores: dict[int, float],
+    *,
+    min_signal: float,
+    min_margin: float,
+) -> bool:
+    rank = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return rank[0][1] >= min_signal and rank[0][1] - rank[1][1] >= min_margin
 
 
 def score_gost_profiles(
@@ -616,7 +710,12 @@ def score_gost_profiles(
     profile_min_score: float = 0.48,
     profile_min_margin: float = 0.055,
 ) -> ProfileScoringResult:
-    """Ранжирует ГОСТ-профили и консервативно выбирает 0°/180°."""
+    """Ранжирует ГОСТ-профили и консервативно выбирает 0°/180°.
+
+    Сначала выполняется полный дешёвый CV-only fusion. Tesseract OSD запускается
+    только если после contrast/agreement итог всё ещё не проходит те же
+    production-пороги orientation_min_signal/orientation_min_margin.
+    """
     profile_list = tuple(profiles)
     if not profile_list:
         raise ValueError("Не переданы профили для scoring")
@@ -630,20 +729,28 @@ def score_gost_profiles(
         partial,
     )
 
-    # OSD — более дорогой этап. На простых письмах, где visual evidence уже
-    # имеет хороший запас, он не запускается. В остальных случаях выполняется
-    # ровно один раз на rectified image. В отличие от CV scoring, OSD получает
-    # исходный rectified image и сам ограничивает его до TEXT_OSD_MAX_SIDE.
-    preliminary = _preliminary_orientation_scores(work)
-    prelim_rank = sorted(preliminary.items(), key=lambda item: item[1], reverse=True)
-    prelim_margin = prelim_rank[0][1] - prelim_rank[1][1]
-    visual_is_strong = prelim_rank[0][1] >= 0.38 and prelim_margin >= 0.18
-    text_scores = {0: 0.0, 180: 0.0} if visual_is_strong else _text_direction_scores(image)
+    # FAST PATH: сначала считаем все CV-признаки и contrast-aware fusion без OSD.
+    zero_text_scores = {0: 0.0, 180: 0.0}
+    cv_base, cv_evidence = _best_orientation_evidence(work, zero_text_scores)
+    cv_scores, _ = _apply_orientation_fusion(cv_base, cv_evidence)
+    cv_resolved = _orientation_is_resolved(
+        cv_scores,
+        min_signal=orientation_min_signal,
+        min_margin=orientation_min_margin,
+    )
+
+    # SLOW PATH: Tesseract запускается только для реально неоднозначного CV.
+    # Он по-прежнему получает исходный rectified image и ограничивает его до
+    # TEXT_OSD_MAX_SIDE внутри _text_direction_scores().
+    text_scores = zero_text_scores if cv_resolved else _text_direction_scores(image)
+
+    base_orientation_best, raw_evidence = _best_orientation_evidence(work, text_scores)
+    orientation_best, evidence_best = _apply_orientation_fusion(
+        base_orientation_best,
+        raw_evidence,
+    )
 
     hypotheses: list[ProfileHypothesis] = []
-    orientation_best = {0: 0.0, 180: 0.0}
-    evidence_best: dict[int, OrientationEvidence] = {}
-
     for orientation in (0, 180):
         item = work[orientation]
         text_direction = text_scores[orientation]
@@ -658,28 +765,6 @@ def score_gost_profiles(
             layout = line_signal if profile.layout == DomesticLayout.LINES else 1.0 - line_signal
             window = item.window_signal if profile.window else 1.0 - item.window_signal
             orientation_signal = _orientation_signal(postage, code_stamp, content_orientation)
-
-            if orientation_signal > orientation_best[orientation]:
-                orientation_best[orientation] = orientation_signal
-                evidence_best[orientation] = OrientationEvidence(
-                    orientation_deg=orientation,
-                    postage=round(postage, 4),
-                    code_stamp=round(code_stamp, 4),
-                    barcode_layout=round(item.barcode_layout, 4),
-                    address_layout=round(item.address_layout, 4),
-                    text_direction=round(text_direction, 4),
-                    content_orientation=round(content_orientation, 4),
-                    base_score=round(orientation_signal, 4),
-                    postage_delta=0.0,
-                    code_stamp_delta=0.0,
-                    barcode_delta=0.0,
-                    address_delta=0.0,
-                    text_delta=0.0,
-                    contrast_bonus=0.0,
-                    agreement_bonus=0.0,
-                    agreement_channels=0,
-                    score=round(orientation_signal, 4),
-                )
 
             weights = (0.08, 0.27, 0.28, 0.23, 0.14) if partial else (0.20, 0.23, 0.24, 0.20, 0.13)
             score = _clamp(
@@ -708,54 +793,6 @@ def score_gost_profiles(
                     ),
                 )
             )
-
-    # Нормально при непустом profile_list обе гипотезы имеют evidence. Fallback
-    # оставлен для защитного поведения при будущих изменениях scoring.
-    for degree in (0, 180):
-        if degree not in evidence_best:
-            content = _content_orientation_signal(
-                work[degree].barcode_layout,
-                work[degree].address_layout,
-                text_scores[degree],
-            )
-            evidence_best[degree] = OrientationEvidence(
-                orientation_deg=degree,
-                postage=0.0,
-                code_stamp=0.0,
-                barcode_layout=round(work[degree].barcode_layout, 4),
-                address_layout=round(work[degree].address_layout, 4),
-                text_direction=round(text_scores[degree], 4),
-                content_orientation=round(content, 4),
-                base_score=round(orientation_best[degree], 4),
-                postage_delta=0.0,
-                code_stamp_delta=0.0,
-                barcode_delta=0.0,
-                address_delta=0.0,
-                text_delta=0.0,
-                contrast_bonus=0.0,
-                agreement_bonus=0.0,
-                agreement_channels=0,
-                score=round(orientation_best[degree], 4),
-            )
-
-    base_orientation_best = dict(orientation_best)
-    fusion = _contrast_aware_fusion(base_orientation_best, evidence_best)
-    for degree in (0, 180):
-        adjustment = fusion[degree]
-        evidence_best[degree] = replace(
-            evidence_best[degree],
-            base_score=round(base_orientation_best[degree], 4),
-            postage_delta=round(adjustment.postage_delta, 4),
-            code_stamp_delta=round(adjustment.code_stamp_delta, 4),
-            barcode_delta=round(adjustment.barcode_delta, 4),
-            address_delta=round(adjustment.address_delta, 4),
-            text_delta=round(adjustment.text_delta, 4),
-            contrast_bonus=round(adjustment.contrast_bonus, 4),
-            agreement_bonus=round(adjustment.agreement_bonus, 4),
-            agreement_channels=adjustment.agreement_channels,
-            score=round(adjustment.score, 4),
-        )
-        orientation_best[degree] = adjustment.score
 
     orientation_rank = sorted(orientation_best.items(), key=lambda item: item[1], reverse=True)
     best_deg, best_signal = orientation_rank[0]
