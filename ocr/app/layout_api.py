@@ -144,6 +144,7 @@ async def analyze_layout(
         rectified.image,
         DOMESTIC_PROFILES,
         frame_contact_sides=detection.frame_contact_sides,
+        profile_min_margin=0.085 if detection.frame_contact_sides else 0.055,
     )
     scoring_ms = (time.perf_counter() - scoring_started) * 1000.0
 
@@ -287,6 +288,7 @@ async def rectify_image(
         rectified.image,
         DOMESTIC_PROFILES,
         frame_contact_sides=detection.frame_contact_sides,
+        profile_min_margin=0.085 if detection.frame_contact_sides else 0.055,
     )
 
     output = rectified.image
