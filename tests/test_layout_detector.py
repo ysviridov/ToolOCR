@@ -25,15 +25,63 @@ def _synthetic_envelope() -> np.ndarray:
     return image
 
 
+def _synthetic_conveyor_frame() -> np.ndarray:
+    """Кадр, близкий к реальной камере сортировщика.
+
+    Светлый конверт лежит на почти чёрной транспортной ленте, содержит много
+    тёмной печати, а нижняя граница практически совпадает с краем кадра. Такой
+    случай обязан находиться яркостным foreground-каналом даже если Canny не
+    сформировал единый внешний контур.
+    """
+
+    image = np.zeros((1200, 1600, 3), dtype=np.uint8)
+    quad = np.array(
+        [
+            [100, 230],
+            [1510, 240],
+            [1510, 1199],
+            [95, 1199],
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(image, quad, (225, 225, 225))
+
+    # Адресные строки.
+    for y in (320, 355, 390, 425):
+        cv2.line(image, (170, y), (700, y), (70, 70, 70), 3)
+
+    # Марки/штемпели и штрихкод создают сильные внутренние границы.
+    cv2.rectangle(image, (1150, 300), (1450, 510), (60, 60, 60), 5)
+    cv2.rectangle(image, (180, 720), (430, 790), (30, 30, 30), 3)
+    for x in range(190, 420, 15):
+        cv2.line(image, (x, 730), (x, 780), (30, 30, 30), 2)
+
+    return image
+
+
 def test_detects_external_quad_before_internal_lines():
     image = _synthetic_envelope()
     detection = detect_envelope_quad(image)
 
-    assert detection.method == "contour_approx"
+    assert detection.method in {"foreground_otsu", "contour_approx"}
     assert detection.confidence > 0.70
     assert detection.area_ratio > 0.40
     assert detection.rectangularity > 0.85
     assert detection.points.shape == (4, 2)
+
+
+def test_light_envelope_on_dark_conveyor_uses_foreground_channel():
+    image = _synthetic_conveyor_frame()
+    detection = detect_envelope_quad(image)
+
+    assert detection.method == "foreground_otsu"
+    assert detection.confidence > 0.85
+    assert detection.area_ratio > 0.65
+    assert detection.rectangularity > 0.95
+
+    rectified = rectify_envelope(image, detection.points)
+    ratio = rectified.width_px / rectified.height_px
+    assert 1.40 < ratio < 1.52
 
 
 def test_rectification_returns_landscape_envelope():
