@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
+import ocr.app.profile_scoring as profile_scoring
 from ocr.app.gost_r_51506_99 import EnvelopeFormat
 from ocr.app.profile_scoring import (
     OrientationEvidence,
@@ -111,6 +112,43 @@ def test_content_orientation_resolves_rotated_machine_dl():
     assert result.orientation.status == "resolved"
     assert result.orientation.value_deg == 180
     assert result.orientation.margin > 0.12
+
+
+def test_cv_resolved_fast_path_does_not_call_osd(monkeypatch):
+    def fail_if_called(_image):
+        raise AssertionError("OSD не должен запускаться на CV-resolved письме")
+
+    monkeypatch.setattr(profile_scoring, "_text_direction_scores", fail_if_called)
+    result = profile_scoring.score_gost_profiles(
+        _synthetic_machine_dl(),
+        profiles_for_format(EnvelopeFormat.DL),
+    )
+
+    assert result.orientation.status == "resolved"
+    assert result.orientation.value_deg == 0
+    assert all(item.text_direction == 0.0 for item in result.orientation_evidence)
+
+
+def test_cv_ambiguous_path_calls_osd_and_retries_fusion(monkeypatch):
+    calls = []
+
+    def fake_osd(_image):
+        calls.append(True)
+        return {0: 1.0, 180: 0.0}
+
+    monkeypatch.setattr(profile_scoring, "_text_direction_scores", fake_osd)
+    blank = np.full((500, 1000, 3), 240, dtype=np.uint8)
+    result = profile_scoring.score_gost_profiles(
+        blank,
+        profiles_for_format(EnvelopeFormat.DL),
+    )
+
+    assert len(calls) == 1
+    assert result.orientation.status == "resolved"
+    assert result.orientation.value_deg == 0
+    evidence = {item.orientation_deg: item for item in result.orientation_evidence}
+    assert evidence[0].text_direction == 1.0
+    assert evidence[180].text_direction == 0.0
 
 
 def test_single_false_postage_anchor_cannot_force_orientation():
