@@ -6,7 +6,8 @@ TOOLOCR_OCR_PORT ?= 8090
 .PHONY: db-up db-down db-logs db-shell import update datasets activate prune reset \
         migrate-stage11 check-stage11 api-up api-down api-logs api-smoke \
         ocr-up ocr-down ocr-logs ocr-health ocr-smoke \
-        layout-profiles layout-smoke layout-calibrate layout-rectify layout-rectify-raw test
+        layout-profiles layout-smoke layout-calibrate layout-calibrations \
+        layout-rectify layout-rectify-raw test
 
 db-up:
 	$(COMPOSE) up -d db
@@ -94,21 +95,59 @@ layout-smoke:
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/analyze" \
 		-F "file=@$(abspath $(FILE))"
 
-# Однократная калибровка фиксированной камеры по полностью видимому эталону
-# известного ГОСТ-формата. Результат сохраняется атомарно.
+# Калибровка фиксированной камеры по полностью видимому эталону известного
+# ГОСТ-формата. Каждый FORMAT обновляет только свою запись в общем JSON.
+# Старый одноформатный v1-файл автоматически мигрирует в набор version=2.
 layout-calibrate:
 	@test -n "$(FILE)" || (echo "Использование: make layout-calibrate FILE=/path/reference.jpg FORMAT=C4 [OUT=config/camera-calibration.json]"; exit 2)
 	@test -n "$(FORMAT)" || (echo "Укажите FORMAT=C6|DL|C5|C4|B4"; exit 2)
-	@out="$${OUT:-config/camera-calibration.json}"; \
+	@set -euo pipefail; \
+	out="$${OUT:-config/camera-calibration.json}"; \
 	mkdir -p "$$(dirname "$$out")"; \
-	tmp="$$out.tmp"; \
+	entry="$$out.entry.tmp"; \
+	merged="$$out.tmp"; \
+	trap 'rm -f "$$entry" "$$merged"' EXIT; \
 	curl --fail-with-body --silent --show-error -X POST \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/calibration/estimate?known_format=$(FORMAT)" \
 		-F "file=@$(abspath $(FILE))" \
-		| jq -e '.calibration' > "$$tmp"; \
-	jq -e '.version and .homography_norm_to_mm and .reference_format' "$$tmp" >/dev/null; \
-	mv "$$tmp" "$$out"; \
-	echo "Калибровка сохранена: $$out"
+		| jq -e '.calibration' > "$$entry"; \
+	jq -e '.version == 1 and .homography_norm_to_mm and .reference_format and .standard' "$$entry" >/dev/null; \
+	if [[ -s "$$out" ]]; then \
+		jq --slurpfile e "$$entry" ' \
+			($$e[0]) as $$new | \
+			if (.version == 2 and (.calibrations | type) == "object") then \
+				if .standard != $$new.standard then error("standard mismatch") \
+				else .calibrations[$$new.reference_format] = $$new end \
+			elif (has("homography_norm_to_mm") and has("reference_format")) then \
+				. as $$old | \
+				if $$old.standard != $$new.standard then error("standard mismatch") \
+				else { \
+					version: 2, \
+					standard: $$new.standard, \
+					calibrations: ({($$old.reference_format): $$old} + {($$new.reference_format): $$new}) \
+				} end \
+			else error("unsupported calibration file") end \
+		' "$$out" > "$$merged"; \
+	else \
+		jq -n --slurpfile e "$$entry" ' \
+			($$e[0]) as $$new | { \
+				version: 2, \
+				standard: $$new.standard, \
+				calibrations: {($$new.reference_format): $$new} \
+			} \
+		' > "$$merged"; \
+	fi; \
+	jq -e '.version == 2 and (.calibrations | type) == "object" and (.calibrations | length) > 0' "$$merged" >/dev/null; \
+	mv "$$merged" "$$out"; \
+	rm -f "$$entry"; \
+	trap - EXIT; \
+	echo "Калибровка $(FORMAT) сохранена/обновлена: $$out"; \
+	jq '{version, standard, count:(.calibrations|length), formats:(.calibrations|keys)}' "$$out"
+
+layout-calibrations:
+	@out="$${OUT:-config/camera-calibration.json}"; \
+	test -s "$$out" || (echo "Файл калибровок не найден: $$out"; exit 2); \
+	jq '{version, standard, count:(if .calibrations then (.calibrations|length) else 1 end), formats:(if .calibrations then (.calibrations|keys) else [.reference_format] end)}' "$$out"
 
 # По умолчанию /rectify применяет автоматически определённый поворот 0/180.
 layout-rectify:
