@@ -5,18 +5,20 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ToolOCR — тестирование Stage 2.1</title>
   <style>
-    :root { color-scheme: light; --bg:#f5f6f8; --card:#fff; --line:#d9dde5; --text:#20242b; --muted:#68707d; --accent:#2f67d8; --danger:#b42318; --ok:#137333; --warn:#9a6700; }
-    * { box-sizing: border-box; }
+    :root { color-scheme:light; --bg:#f5f6f8; --card:#fff; --line:#d9dde5; --text:#20242b; --muted:#68707d; --accent:#2f67d8; --danger:#b42318; --ok:#137333; --warn:#9a6700; }
+    * { box-sizing:border-box; }
     body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
     main { max-width:1500px; margin:0 auto; padding:24px; }
     h1 { margin:0 0 4px; font-size:26px; }
-    h2 { margin:0 0 14px; font-size:18px; }
+    h2 { margin:0; font-size:18px; }
     .muted { color:var(--muted); }
     .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-top:18px; box-shadow:0 1px 2px rgba(0,0,0,.03); }
     .drop { border:2px dashed #9eabc2; border-radius:12px; padding:34px; text-align:center; cursor:pointer; background:#fafbfe; transition:.15s; }
     .drop.drag { border-color:var(--accent); background:#eef4ff; }
     .drop strong { display:block; font-size:17px; margin-bottom:6px; }
     .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+    .result-head { margin:0 0 14px; }
+    .result-head h2 { margin-right:auto; }
     button { border:1px solid #aeb7c6; background:#fff; color:var(--text); border-radius:8px; padding:8px 12px; cursor:pointer; font-weight:600; }
     button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
     button.danger { color:var(--danger); border-color:#e7b6b0; }
@@ -24,7 +26,7 @@
     .status { margin-left:auto; color:var(--muted); }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:9px; }
     table { width:100%; border-collapse:collapse; min-width:950px; }
-    th, td { padding:9px 10px; border-bottom:1px solid #e7eaf0; text-align:left; vertical-align:middle; }
+    th,td { padding:9px 10px; border-bottom:1px solid #e7eaf0; text-align:left; vertical-align:middle; }
     th { background:#f7f8fa; font-size:12px; text-transform:uppercase; letter-spacing:.02em; color:#5a6270; position:sticky; top:0; }
     tbody tr:last-child td { border-bottom:0; }
     .name { max-width:430px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -39,8 +41,7 @@
     .stat { border:1px solid var(--line); border-radius:9px; padding:10px 12px; background:#fafbfc; min-width:0; }
     .stat-label { color:var(--muted); font-size:12px; margin-bottom:2px; }
     .stat-value { font-size:20px; line-height:1.2; font-weight:750; font-variant-numeric:tabular-nums; }
-    .stat-value.ok { color:var(--ok); }
-    .stat-value.err { color:var(--danger); }
+    .stat-value.ok { color:var(--ok); } .stat-value.err { color:var(--danger); }
     .stats-details { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:9px; }
     .stats-group { border:1px solid var(--line); border-radius:9px; padding:9px 11px; background:#fff; }
     .stats-group strong { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
@@ -52,20 +53,16 @@
     .modal-head strong { flex:1; }
     .modal-body { padding:16px; overflow:auto; max-height:80vh; }
     pre { margin:0; white-space:pre; overflow:auto; background:#101317; color:#e6edf3; padding:14px; border-radius:8px; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; tab-size:2; }
-    .json-key { color:#7ee787; }
-    .json-string { color:#a5d6ff; }
-    .json-number { color:#79c0ff; }
-    .json-boolean { color:#ff7b72; }
-    .json-null { color:#d2a8ff; }
+    .json-key{color:#7ee787}.json-string{color:#a5d6ff}.json-number{color:#79c0ff}.json-boolean{color:#ff7b72}.json-null{color:#d2a8ff}
     #cropImage { display:block; max-width:100%; max-height:75vh; margin:auto; background:#222; }
     .upload-errors { margin-top:10px; color:var(--danger); white-space:pre-wrap; }
-    @media (max-width:700px) { main { padding:12px; } .card { padding:12px; } .status { width:100%; margin-left:0; } }
+    @media (max-width:700px) { main{padding:12px}.card{padding:12px}.status{width:100%;margin-left:0} }
   </style>
 </head>
 <body>
 <main>
   <h1>ToolOCR — тестирование Stage 2.1</h1>
-  <div class="muted">Библиотека тестовых изображений хранится в постоянном Docker volume. Normalized crop генерируется только по запросу и на диск не сохраняется.</div>
+  <div class="muted">Исходные тестовые изображения хранятся в постоянном Docker volume. Normalized crop генерируется по запросу и на диск не сохраняется.</div>
 
   <section class="card">
     <h2>Загрузка изображений</h2>
@@ -86,281 +83,55 @@
       <button id="delete" class="danger">Удалить выбранные</button>
       <span id="libraryStatus" class="status"></span>
     </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th></th><th>Файл</th><th>Размер</th><th>Разрешение</th><th>Загружен</th></tr></thead>
-        <tbody id="libraryBody"></tbody>
-      </table>
-    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th></th><th>Файл</th><th>Размер</th><th>Разрешение</th><th>Загружен</th></tr></thead>
+      <tbody id="libraryBody"></tbody>
+    </table></div>
   </section>
 
   <section class="card">
-    <h2>Результаты последнего теста</h2>
-    <div id="resultStats" class="stats" hidden></div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Файл</th><th>Layout</th><th>Формат / ошибка</th><th>Ориентация</th><th>Normalization</th><th>Время, ms</th><th>Действия</th></tr></thead>
-        <tbody id="resultBody"><tr><td colspan="7" class="empty">Тест ещё не запускался</td></tr></tbody>
-      </table>
+    <div class="toolbar result-head">
+      <h2>Результаты последнего теста</h2>
+      <button id="exportDebug" disabled>Выгрузить debug JSON</button>
     </div>
+    <div id="resultStats" class="stats" hidden></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Файл</th><th>Layout</th><th>Формат / ошибка</th><th>Ориентация</th><th>Normalization</th><th>Время, ms</th><th>Действия</th></tr></thead>
+      <tbody id="resultBody"><tr><td colspan="7" class="empty">Тест ещё не запускался</td></tr></tbody>
+    </table></div>
   </section>
 </main>
 
-<dialog id="debugDialog">
-  <div class="modal-head"><strong id="debugTitle">Debug JSON</strong><button data-close="debugDialog">Закрыть</button></div>
-  <div class="modal-body"><pre id="debugPre"></pre></div>
-</dialog>
-
-<dialog id="cropDialog">
-  <div class="modal-head"><strong id="cropTitle">Изображение</strong><button data-close="cropDialog">Закрыть</button></div>
-  <div class="modal-body"><img id="cropImage" alt="Изображение"></div>
-</dialog>
+<dialog id="debugDialog"><div class="modal-head"><strong id="debugTitle">Debug JSON</strong><button data-close="debugDialog">Закрыть</button></div><div class="modal-body"><pre id="debugPre"></pre></div></dialog>
+<dialog id="cropDialog"><div class="modal-head"><strong id="cropTitle">Изображение</strong><button data-close="cropDialog">Закрыть</button></div><div class="modal-body"><img id="cropImage" alt="Изображение"></div></dialog>
 
 <script>
-const state = { images: [], results: new Map() };
-const $ = id => document.getElementById(id);
-const escapeHtml = s => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const fmtBytes = n => n < 1024 ? `${n} B` : n < 1024*1024 ? `${(n/1024).toFixed(1)} KB` : `${(n/1024/1024).toFixed(2)} MB`;
-const fmtDate = s => { try { return new Date(s).toLocaleString('ru-RU'); } catch { return s; } };
+const state={images:[],results:new Map(),lastRunAt:null};
+const $=id=>document.getElementById(id);
+const escapeHtml=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const fmtBytes=n=>n<1024?`${n} B`:n<1024*1024?`${(n/1024).toFixed(1)} KB`:`${(n/1024/1024).toFixed(2)} MB`;
+const fmtDate=s=>{try{return new Date(s).toLocaleString('ru-RU')}catch{return s}};
 
-async function api(url, options={}) {
-  const response = await fetch(url, options);
-  let payload = null;
-  const type = response.headers.get('content-type') || '';
-  if (type.includes('application/json')) payload = await response.json();
-  if (!response.ok) throw new Error(payload ? JSON.stringify(payload.detail ?? payload) : `${response.status} ${response.statusText}`);
-  return payload;
-}
-
-async function loadImages() {
-  $('libraryStatus').textContent = 'Обновление списка…';
-  try {
-    const data = await api('/v1/test-ui/images');
-    state.images = data.images;
-    renderLibrary();
-    $('libraryStatus').textContent = `Файлов: ${data.count}`;
-  } catch (e) {
-    $('libraryStatus').textContent = `Ошибка: ${e.message}`;
-  }
-}
-
-function renderLibrary() {
-  const body = $('libraryBody');
-  if (!state.images.length) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">Нет загруженных изображений</td></tr>';
-    return;
-  }
-  body.innerHTML = state.images.map(item => `
-    <tr>
-      <td><input class="pick" type="checkbox" value="${item.id}"></td>
-      <td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td>
-      <td>${fmtBytes(item.bytes)}</td>
-      <td>${item.width_px}×${item.height_px}</td>
-      <td>${fmtDate(item.uploaded_at)}</td>
-    </tr>`).join('');
-}
-
-function selectedIds() { return [...document.querySelectorAll('.pick:checked')].map(x => x.value); }
-
-async function uploadFiles(files) {
-  if (!files.length) return;
-  $('uploadStatus').textContent = `Загрузка: ${files.length} файл(ов)…`;
-  const form = new FormData();
-  [...files].forEach(file => form.append('files', file, file.name));
-  try {
-    const data = await api('/v1/test-ui/images', {method:'POST', body:form});
-    const lines = [];
-    if (data.uploaded.length) lines.push(`Загружено: ${data.uploaded.length}`);
-    data.errors.forEach(e => lines.push(`${e.name}: ${e.error}`));
-    $('uploadStatus').textContent = lines.join('\n');
-    await loadImages();
-  } catch (e) {
-    $('uploadStatus').textContent = `Ошибка загрузки: ${e.message}`;
-  }
-}
-
-function pill(value, kind='') { return `<span class="pill ${kind}">${escapeHtml(value ?? '—')}</span>`; }
-
-function countBy(items, selector) {
-  const counts = new Map();
-  items.forEach(item => {
-    const key = String(selector(item) ?? '—');
-    counts.set(key, (counts.get(key) || 0) + 1);
-  });
-  return [...counts.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ru'));
-}
-
-function percentile(values, fraction) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a,b) => a-b);
-  const index = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
-  return sorted[index];
-}
-
-function statCard(label, value, kind='') {
-  return `<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value ${kind}">${escapeHtml(value)}</div></div>`;
-}
-
-function statGroup(label, entries) {
-  const chips = entries.length
-    ? entries.map(([key,count]) => `<span class="stats-chip">${escapeHtml(key)}: <strong>${count}</strong></span>`).join('')
-    : '<span class="muted">—</span>';
-  return `<div class="stats-group"><strong>${escapeHtml(label)}</strong><div class="stats-chips">${chips}</div></div>`;
-}
-
-function renderStats(items) {
-  const root = $('resultStats');
-  if (!items.length) { root.hidden = true; root.innerHTML = ''; return; }
-
-  const total = items.length;
-  const success = items.filter(item => item.ok).length;
-  const errors = total - success;
-  const formatResolved = items.filter(item => item.ok && item.format).length;
-  const orientationResolved = items.filter(item => item.ok && item.orientation_status === 'resolved').length;
-  const timings = items.map(item => item.total_ms).filter(value => typeof value === 'number' && Number.isFinite(value));
-  const avg = timings.length ? timings.reduce((sum,value) => sum + value, 0) / timings.length : null;
-  const median = percentile(timings, 0.50);
-  const p95 = percentile(timings, 0.95);
-
-  const formatCounts = countBy(items, item => !item.ok ? 'ошибка' : (item.format || 'не определён'));
-  const orientationCounts = countBy(items, item => {
-    if (!item.ok) return 'ошибка';
-    if (item.orientation_status === 'resolved') return `${item.orientation_deg}°`;
-    return item.orientation_status || 'не определена';
-  });
-  const layoutCounts = countBy(items, item => item.layout_status || '—');
-  const normalizationCounts = countBy(items, item => item.normalization_status || (item.ok ? '—' : 'ошибка'));
-
-  root.innerHTML = `
-    <div class="stats-grid">
-      ${statCard('Всего', total)}
-      ${statCard('Успешно', success, 'ok')}
-      ${statCard('Ошибки', errors, errors ? 'err' : '')}
-      ${statCard('Формат определён', `${formatResolved}/${total}`)}
-      ${statCard('Ориентация определена', `${orientationResolved}/${total}`)}
-      ${statCard('Среднее, ms', avg === null ? '—' : avg.toFixed(1))}
-      ${statCard('Median, ms', median === null ? '—' : median.toFixed(1))}
-      ${statCard('P95, ms', p95 === null ? '—' : p95.toFixed(1))}
-    </div>
-    <div class="stats-details">
-      ${statGroup('Форматы', formatCounts)}
-      ${statGroup('Ориентация', orientationCounts)}
-      ${statGroup('Layout', layoutCounts)}
-      ${statGroup('Normalization', normalizationCounts)}
-    </div>`;
-  root.hidden = false;
-}
-
-function renderResults(items) {
-  const body = $('resultBody');
-  state.results.clear();
-  renderStats(items);
-  if (!items.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty">Нет результатов</td></tr>';
-    return;
-  }
-  items.forEach(item => state.results.set(item.id, item));
-  body.innerHTML = items.map(item => {
-    const layoutKind = item.ok ? (item.layout_status === 'detected' ? 'ok' : 'warn') : 'err';
-    const formatText = item.ok ? `${item.format ?? 'не определён'}${item.format_status ? ` · ${item.format_status}` : ''}` : (typeof item.error === 'string' ? item.error : JSON.stringify(item.error));
-    const orientation = item.orientation_status === 'resolved' ? `${item.orientation_deg}°` : (item.orientation_status ?? '—');
-    return `<tr>
-      <td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td>
-      <td>${pill(item.layout_status, layoutKind)}</td>
-      <td>${item.ok ? escapeHtml(formatText) : `<span class="pill err">${escapeHtml(formatText)}</span>`}</td>
-      <td>${escapeHtml(orientation)}</td>
-      <td>${escapeHtml(item.normalization_status ?? '—')}</td>
-      <td>${item.total_ms ?? '—'}</td>
-      <td><div class="actions">
-        <button onclick="showOriginal('${item.id}')">Исходное</button>
-        <button onclick="showCrop('${item.id}')">Normalized crop</button>
-        <button onclick="showDebug('${item.id}')">Показать debug</button>
-      </div></td>
-    </tr>`;
-  }).join('');
-}
-
-function highlightedJson(value, depth=0) {
-  const pad = '  '.repeat(depth);
-  const childPad = '  '.repeat(depth + 1);
-  if (value === null) return '<span class="json-null">null</span>';
-  if (typeof value === 'string') return `<span class="json-string">${escapeHtml(JSON.stringify(value))}</span>`;
-  if (typeof value === 'number') return `<span class="json-number">${escapeHtml(String(value))}</span>`;
-  if (typeof value === 'boolean') return `<span class="json-boolean">${value}</span>`;
-  if (Array.isArray(value)) {
-    if (!value.length) return '[]';
-    return `[\n${value.map(item => `${childPad}${highlightedJson(item, depth + 1)}`).join(',\n')}\n${pad}]`;
-  }
-  if (typeof value === 'object') {
-    const entries = Object.entries(value);
-    if (!entries.length) return '{}';
-    return `{\n${entries.map(([key,item]) => `${childPad}<span class="json-key">${escapeHtml(JSON.stringify(key))}</span>: ${highlightedJson(item, depth + 1)}`).join(',\n')}\n${pad}}`;
-  }
-  return `<span class="json-null">${escapeHtml(String(value))}</span>`;
-}
-
-async function runSelected() {
-  const ids = selectedIds();
-  if (!ids.length) { alert('Выберите хотя бы одно изображение'); return; }
-  const btn = $('run'); btn.disabled = true; btn.textContent = `Обработка ${ids.length}…`;
-  try {
-    const data = await api('/v1/test-ui/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids})});
-    renderResults(data.results);
-  } catch (e) {
-    alert(`Ошибка запуска теста: ${e.message}`);
-  } finally {
-    btn.disabled = false; btn.textContent = 'Запустить тест';
-  }
-}
-
-async function deleteSelected() {
-  const ids = selectedIds();
-  if (!ids.length) { alert('Выберите хотя бы одно изображение'); return; }
-  if (!confirm(`Удалить выбранные изображения (${ids.length}) из постоянного volume?`)) return;
-  try {
-    await api('/v1/test-ui/images/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids})});
-    await loadImages();
-  } catch (e) { alert(`Ошибка удаления: ${e.message}`); }
-}
-
-window.showDebug = function(id) {
-  const item = state.results.get(id); if (!item) return;
-  $('debugTitle').textContent = `Debug JSON — ${item.name}`;
-  $('debugPre').innerHTML = highlightedJson(item.debug);
-  $('debugDialog').showModal();
-}
-
-window.showOriginal = function(id) {
-  const item = state.results.get(id); if (!item) return;
-  $('cropTitle').textContent = `Исходное изображение — ${item.name}`;
-  $('cropImage').alt = `Исходное изображение — ${item.name}`;
-  $('cropImage').src = `/v1/test-ui/images/${id}/original?t=${Date.now()}`;
-  $('cropDialog').showModal();
-}
-
-window.showCrop = function(id) {
-  const item = state.results.get(id); if (!item) return;
-  $('cropTitle').textContent = `Normalized crop — ${item.name}`;
-  $('cropImage').alt = `Normalized crop — ${item.name}`;
-  $('cropImage').src = `/v1/test-ui/images/${id}/normalized?t=${Date.now()}`;
-  $('cropDialog').showModal();
-}
-
-const drop = $('drop'), input = $('fileInput');
-drop.addEventListener('click', () => input.click());
-drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') input.click(); });
-input.addEventListener('change', () => { uploadFiles(input.files); input.value=''; });
-['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
-['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
-drop.addEventListener('drop', e => uploadFiles(e.dataTransfer.files));
-$('selectAll').onclick = () => document.querySelectorAll('.pick').forEach(x => x.checked = true);
-$('selectNone').onclick = () => document.querySelectorAll('.pick').forEach(x => x.checked = false);
-$('run').onclick = runSelected;
-$('delete').onclick = deleteSelected;
-document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => $(btn.dataset.close).close());
-$('cropDialog').addEventListener('close', () => $('cropImage').removeAttribute('src'));
-
-loadImages();
+async function api(url,options={}){const response=await fetch(url,options);let payload=null;const type=response.headers.get('content-type')||'';if(type.includes('application/json'))payload=await response.json();if(!response.ok)throw new Error(payload?JSON.stringify(payload.detail??payload):`${response.status} ${response.statusText}`);return payload}
+async function loadImages(){ $('libraryStatus').textContent='Обновление списка…'; try{const data=await api('/v1/test-ui/images');state.images=data.images;renderLibrary();$('libraryStatus').textContent=`Файлов: ${data.count}`}catch(e){$('libraryStatus').textContent=`Ошибка: ${e.message}`} }
+function renderLibrary(){const body=$('libraryBody');if(!state.images.length){body.innerHTML='<tr><td colspan="5" class="empty">Нет загруженных изображений</td></tr>';return}body.innerHTML=state.images.map(item=>`<tr><td><input class="pick" type="checkbox" value="${item.id}"></td><td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td>${fmtBytes(item.bytes)}</td><td>${item.width_px}×${item.height_px}</td><td>${fmtDate(item.uploaded_at)}</td></tr>`).join('')}
+function selectedIds(){return[...document.querySelectorAll('.pick:checked')].map(x=>x.value)}
+async function uploadFiles(files){if(!files.length)return;$('uploadStatus').textContent=`Загрузка: ${files.length} файл(ов)…`;const form=new FormData();[...files].forEach(file=>form.append('files',file,file.name));try{const data=await api('/v1/test-ui/images',{method:'POST',body:form});const lines=[];if(data.uploaded.length)lines.push(`Загружено: ${data.uploaded.length}`);data.errors.forEach(e=>lines.push(`${e.name}: ${e.error}`));$('uploadStatus').textContent=lines.join('\n');await loadImages()}catch(e){$('uploadStatus').textContent=`Ошибка загрузки: ${e.message}`}}
+function pill(value,kind=''){return`<span class="pill ${kind}">${escapeHtml(value??'—')}</span>`}
+function countBy(items,selector){const counts=new Map();items.forEach(item=>{const key=String(selector(item)??'—');counts.set(key,(counts.get(key)||0)+1)});return[...counts.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0],'ru'))}
+function percentile(values,fraction){if(!values.length)return null;const sorted=[...values].sort((a,b)=>a-b);return sorted[Math.max(0,Math.ceil(sorted.length*fraction)-1)]}
+function statCard(label,value,kind=''){return`<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value ${kind}">${escapeHtml(value)}</div></div>`}
+function statGroup(label,entries){const chips=entries.length?entries.map(([key,count])=>`<span class="stats-chip">${escapeHtml(key)}: <strong>${count}</strong></span>`).join(''):'<span class="muted">—</span>';return`<div class="stats-group"><strong>${escapeHtml(label)}</strong><div class="stats-chips">${chips}</div></div>`}
+function renderStats(items){const root=$('resultStats');if(!items.length){root.hidden=true;root.innerHTML='';return}const total=items.length,success=items.filter(x=>x.ok).length,errors=total-success,formatResolved=items.filter(x=>x.ok&&x.format).length,orientationResolved=items.filter(x=>x.ok&&x.orientation_status==='resolved').length;const timings=items.map(x=>x.total_ms).filter(x=>typeof x==='number'&&Number.isFinite(x));const avg=timings.length?timings.reduce((a,b)=>a+b,0)/timings.length:null,median=percentile(timings,.5),p95=percentile(timings,.95);const formats=countBy(items,x=>!x.ok?'ошибка':(x.format||'не определён')),orientations=countBy(items,x=>!x.ok?'ошибка':x.orientation_status==='resolved'?`${x.orientation_deg}°`:(x.orientation_status||'не определена')),layouts=countBy(items,x=>x.layout_status||'—'),normalizations=countBy(items,x=>x.normalization_status||(x.ok?'—':'ошибка'));root.innerHTML=`<div class="stats-grid">${statCard('Всего',total)}${statCard('Успешно',success,'ok')}${statCard('Ошибки',errors,errors?'err':'')}${statCard('Формат определён',`${formatResolved}/${total}`)}${statCard('Ориентация определена',`${orientationResolved}/${total}`)}${statCard('Среднее, ms',avg===null?'—':avg.toFixed(1))}${statCard('Median, ms',median===null?'—':median.toFixed(1))}${statCard('P95, ms',p95===null?'—':p95.toFixed(1))}</div><div class="stats-details">${statGroup('Форматы',formats)}${statGroup('Ориентация',orientations)}${statGroup('Layout',layouts)}${statGroup('Normalization',normalizations)}</div>`;root.hidden=false}
+function renderResults(items){const body=$('resultBody');state.results.clear();state.lastRunAt=new Date().toISOString();renderStats(items);$('exportDebug').disabled=!items.length;if(!items.length){body.innerHTML='<tr><td colspan="7" class="empty">Нет результатов</td></tr>';return}items.forEach(item=>state.results.set(item.id,item));body.innerHTML=items.map(item=>{const layoutKind=item.ok?(item.layout_status==='detected'?'ok':'warn'):'err';const formatText=item.ok?`${item.format??'не определён'}${item.format_status?` · ${item.format_status}`:''}`:(typeof item.error==='string'?item.error:JSON.stringify(item.error));const orientation=item.orientation_status==='resolved'?`${item.orientation_deg}°`:(item.orientation_status??'—');return`<tr><td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td>${pill(item.layout_status,layoutKind)}</td><td>${item.ok?escapeHtml(formatText):`<span class="pill err">${escapeHtml(formatText)}</span>`}</td><td>${escapeHtml(orientation)}</td><td>${escapeHtml(item.normalization_status??'—')}</td><td>${item.total_ms??'—'}</td><td><div class="actions"><button onclick="showOriginal('${item.id}')">Исходное</button><button onclick="showCrop('${item.id}')">Normalized crop</button><button onclick="showDebug('${item.id}')">Показать debug</button></div></td></tr>`}).join('')}
+function highlightedJson(value,depth=0){const pad='  '.repeat(depth),childPad='  '.repeat(depth+1);if(value===null)return'<span class="json-null">null</span>';if(typeof value==='string')return`<span class="json-string">${escapeHtml(JSON.stringify(value))}</span>`;if(typeof value==='number')return`<span class="json-number">${escapeHtml(String(value))}</span>`;if(typeof value==='boolean')return`<span class="json-boolean">${value}</span>`;if(Array.isArray(value)){if(!value.length)return'[]';return`[\n${value.map(item=>`${childPad}${highlightedJson(item,depth+1)}`).join(',\n')}\n${pad}]`}if(typeof value==='object'){const entries=Object.entries(value);if(!entries.length)return'{}';return`{\n${entries.map(([key,item])=>`${childPad}<span class="json-key">${escapeHtml(JSON.stringify(key))}</span>: ${highlightedJson(item,depth+1)}`).join(',\n')}\n${pad}}`}return`<span class="json-null">${escapeHtml(String(value))}</span>`}
+async function runSelected(){const ids=selectedIds();if(!ids.length){alert('Выберите хотя бы одно изображение');return}const btn=$('run');btn.disabled=true;btn.textContent=`Обработка ${ids.length}…`;try{const data=await api('/v1/test-ui/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});renderResults(data.results)}catch(e){alert(`Ошибка запуска теста: ${e.message}`)}finally{btn.disabled=false;btn.textContent='Запустить тест'}}
+async function deleteSelected(){const ids=selectedIds();if(!ids.length){alert('Выберите хотя бы одно изображение');return}if(!confirm(`Удалить выбранные изображения (${ids.length}) из постоянного volume?`))return;try{await api('/v1/test-ui/images/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});await loadImages()}catch(e){alert(`Ошибка удаления: ${e.message}`)}}
+function exportDebugJson(){const items=[...state.results.values()];if(!items.length)return;const payload={schema:'toolocr.test-ui.debug-export.v1',exported_at:new Date().toISOString(),test_started_at:state.lastRunAt,count:items.length,results:items.map(item=>({id:item.id,filename:item.name,ok:item.ok,layout_status:item.layout_status,format:item.format,format_status:item.format_status,orientation_status:item.orientation_status,orientation_deg:item.orientation_deg,normalization_status:item.normalization_status,total_ms:item.total_ms,error:item.error??null,debug:item.debug}))};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');const stamp=new Date().toISOString().replace(/[:.]/g,'-');link.href=url;link.download=`toolocr-debug-${stamp}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+window.showDebug=id=>{const item=state.results.get(id);if(!item)return;$('debugTitle').textContent=`Debug JSON — ${item.name}`;$('debugPre').innerHTML=highlightedJson(item.debug);$('debugDialog').showModal()};
+window.showOriginal=id=>{const item=state.results.get(id);if(!item)return;$('cropTitle').textContent=`Исходное изображение — ${item.name}`;$('cropImage').alt=`Исходное изображение — ${item.name}`;$('cropImage').src=`/v1/test-ui/images/${id}/original?t=${Date.now()}`;$('cropDialog').showModal()};
+window.showCrop=id=>{const item=state.results.get(id);if(!item)return;$('cropTitle').textContent=`Normalized crop — ${item.name}`;$('cropImage').alt=`Normalized crop — ${item.name}`;$('cropImage').src=`/v1/test-ui/images/${id}/normalized?t=${Date.now()}`;$('cropDialog').showModal()};
+const drop=$('drop'),input=$('fileInput');drop.addEventListener('click',()=>input.click());drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')input.click()});input.addEventListener('change',()=>{uploadFiles(input.files);input.value=''});['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>uploadFiles(e.dataTransfer.files));$('selectAll').onclick=()=>document.querySelectorAll('.pick').forEach(x=>x.checked=true);$('selectNone').onclick=()=>document.querySelectorAll('.pick').forEach(x=>x.checked=false);$('run').onclick=runSelected;$('delete').onclick=deleteSelected;$('exportDebug').onclick=exportDebugJson;document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>$(btn.dataset.close).close());$('cropDialog').addEventListener('close',()=>$('cropImage').removeAttribute('src'));loadImages();
 </script>
 </body>
 </html>
