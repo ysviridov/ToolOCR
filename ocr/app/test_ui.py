@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import mimetypes
 import os
 import re
 import tempfile
@@ -213,6 +214,28 @@ def delete_test_images(request: DeleteRequest) -> dict[str, Any]:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Не удалось удалить {meta['name']}: {exc}") from exc
     return {"deleted": deleted, "missing": missing}
+
+
+@router.get("/v1/test-ui/images/{file_id}/original", response_class=Response)
+def original_image(file_id: str) -> Response:
+    """Возвращает исходный файл из постоянной тестовой библиотеки без преобразований."""
+
+    meta = _load_metadata(_validate_file_id(file_id))
+    path = _image_path(meta)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Не удалось прочитать исходное изображение") from exc
+    media_type = mimetypes.guess_type(meta.get("name") or path.name)[0] or "application/octet-stream"
+    return Response(
+        content=raw,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Content-Disposition": f'inline; filename="{path.name}"',
+        },
+    )
 
 
 @router.get("/v1/test-ui/images/{file_id}/normalized", response_class=Response)
