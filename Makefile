@@ -113,29 +113,9 @@ layout-calibrate:
 		| jq -e '.calibration' > "$$entry"; \
 	jq -e '.version == 1 and .homography_norm_to_mm and .reference_format and .standard' "$$entry" >/dev/null; \
 	if [[ -s "$$out" ]]; then \
-		jq --slurpfile e "$$entry" ' \
-			($$e[0]) as $$new | \
-			if (.version == 2 and (.calibrations | type) == "object") then \
-				if .standard != $$new.standard then error("standard mismatch") \
-				else .calibrations[$$new.reference_format] = $$new end \
-			elif (has("homography_norm_to_mm") and has("reference_format")) then \
-				. as $$old | \
-				if $$old.standard != $$new.standard then error("standard mismatch") \
-				else { \
-					version: 2, \
-					standard: $$new.standard, \
-					calibrations: ({($$old.reference_format): $$old} + {($$new.reference_format): $$new}) \
-				} end \
-			else error("unsupported calibration file") end \
-		' "$$out" > "$$merged"; \
+		jq --slurpfile e "$$entry" '($$e[0]) as $$new | if (.version == 2 and (.calibrations | type) == "object") then if .standard != $$new.standard then error("standard mismatch") else .calibrations[$$new.reference_format] = $$new end elif (has("homography_norm_to_mm") and has("reference_format")) then . as $$old | if $$old.standard != $$new.standard then error("standard mismatch") else {version: 2, standard: $$new.standard, calibrations: ({($$old.reference_format): $$old} + {($$new.reference_format): $$new})} end else error("unsupported calibration file") end' "$$out" > "$$merged"; \
 	else \
-		jq -n --slurpfile e "$$entry" ' \
-			($$e[0]) as $$new | { \
-				version: 2, \
-				standard: $$new.standard, \
-				calibrations: {($$new.reference_format): $$new} \
-			} \
-		' > "$$merged"; \
+		jq -n --slurpfile e "$$entry" '($$e[0]) as $$new | {version: 2, standard: $$new.standard, calibrations: {($$new.reference_format): $$new}}' > "$$merged"; \
 	fi; \
 	jq -e '.version == 2 and (.calibrations | type) == "object" and (.calibrations | length) > 0' "$$merged" >/dev/null; \
 	mv "$$merged" "$$out"; \
