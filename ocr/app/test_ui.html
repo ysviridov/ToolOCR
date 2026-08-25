@@ -94,8 +94,8 @@
 </dialog>
 
 <dialog id="cropDialog">
-  <div class="modal-head"><strong id="cropTitle">Normalized crop</strong><button data-close="cropDialog">Закрыть</button></div>
-  <div class="modal-body"><img id="cropImage" alt="Normalized crop"></div>
+  <div class="modal-head"><strong id="cropTitle">Изображение</strong><button data-close="cropDialog">Закрыть</button></div>
+  <div class="modal-body"><img id="cropImage" alt="Изображение"></div>
 </dialog>
 
 <script>
@@ -183,8 +183,9 @@ function renderResults(items) {
       <td>${escapeHtml(item.normalization_status ?? '—')}</td>
       <td>${item.total_ms ?? '—'}</td>
       <td><div class="actions">
-        <button onclick="showDebug('${item.id}')">Показать debug</button>
+        <button onclick="showOriginal('${item.id}')">Исходное</button>
         <button onclick="showCrop('${item.id}')">Normalized crop</button>
+        <button onclick="showDebug('${item.id}')">Показать debug</button>
       </div></td>
     </tr>`;
   }).join('');
@@ -221,9 +222,18 @@ window.showDebug = function(id) {
   $('debugDialog').showModal();
 }
 
+window.showOriginal = function(id) {
+  const item = state.results.get(id); if (!item) return;
+  $('cropTitle').textContent = `Исходное изображение — ${item.name}`;
+  $('cropImage').alt = `Исходное изображение — ${item.name}`;
+  $('cropImage').src = `/v1/test-ui/images/${id}/original?t=${Date.now()}`;
+  $('cropDialog').showModal();
+}
+
 window.showCrop = function(id) {
   const item = state.results.get(id); if (!item) return;
   $('cropTitle').textContent = `Normalized crop — ${item.name}`;
+  $('cropImage').alt = `Normalized crop — ${item.name}`;
   $('cropImage').src = `/v1/test-ui/images/${id}/normalized?t=${Date.now()}`;
   $('cropDialog').showModal();
 }
