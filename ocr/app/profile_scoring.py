@@ -23,6 +23,7 @@ CODE_BAR_WIDTH_MM = 7.0
 CODE_BAR_HEIGHT_MM = 2.0
 CODE_FROM_BOTTOM_MM = 25.0
 SCORING_MAX_SIDE = 1000
+TEXT_OSD_MAX_SIDE = max(1000, int(os.environ.get("ORIENTATION_TEXT_OSD_MAX_SIDE", "1800")))
 TEXT_OSD_ENABLED = os.environ.get("ORIENTATION_TEXT_OSD", "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
@@ -377,18 +378,33 @@ def _address_layout_signal(gray: np.ndarray) -> float:
     return _clamp(presence * (0.55 * preferred + 0.45 * contrast))
 
 
+def _resize_for_osd(image: np.ndarray) -> np.ndarray:
+    """OSD требует заметно большего разрешения текста, чем быстрый CV scoring."""
+    h, w = image.shape[:2]
+    scale = min(1.0, TEXT_OSD_MAX_SIDE / float(max(h, w)))
+    if scale >= 1.0:
+        return image
+    return cv2.resize(
+        image,
+        (max(2, int(round(w * scale))), max(2, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
 def _text_direction_scores(image: np.ndarray) -> dict[int, float]:
     """Определяет 0/180 по направлению текста через Tesseract OSD.
 
     OSD запускается максимум один раз на письмо и только для сложных случаев.
-    Если текста мало, OSD недоступен или возвращает 90/270°, канал считается
-    отсутствующим и не влияет на решение.
+    Для OSD используется отдельная копия до 1800 px по длинной стороне (по
+    умолчанию), а не 1000 px быстрых CV-признаков: на production-фотографиях
+    уменьшение до 1000 px резко снижает orientation confidence Tesseract.
     """
     scores = {0: 0.0, 180: 0.0}
     if not TEXT_OSD_ENABLED:
         return scores
     try:
-        result = pytesseract.image_to_osd(image, output_type=Output.DICT)
+        osd_image = _resize_for_osd(image)
+        result = pytesseract.image_to_osd(osd_image, output_type=Output.DICT)
         rotate = int(result.get("rotate", -1)) % 360
         confidence = float(result.get("orientation_conf", 0.0) or 0.0)
     except (pytesseract.TesseractError, pytesseract.TesseractNotFoundError, TypeError, ValueError):
@@ -411,9 +427,10 @@ def _content_orientation_signal(
 ) -> float:
     """Третий независимый канал ориентации: barcode + адреса + направление текста."""
     cv_layout = _clamp(0.46 * barcode_layout + 0.54 * address_layout)
-    # Сильный OSD способен дать самостоятельное свидетельство, но CV-layout
-    # сохраняется как независимая страховка для рукописных/малотекстовых писем.
-    return _clamp(max(cv_layout, 0.84 * text_direction, 0.58 * cv_layout + 0.42 * text_direction))
+    # OSD orientation_conf уже нормирован в 0..1. После перехода на отдельное
+    # разрешение до 1800 px сильный текстовый сигнал не ослабляем повторно.
+    # При низком confidence он сам остаётся ниже CV-layout и не доминирует.
+    return _clamp(max(cv_layout, text_direction, 0.58 * cv_layout + 0.42 * text_direction))
 
 
 def _orientation_signal(
@@ -518,12 +535,13 @@ def score_gost_profiles(
 
     # OSD — более дорогой этап. На простых письмах, где visual evidence уже
     # имеет хороший запас, он не запускается. В остальных случаях выполняется
-    # ровно один раз на rectified image.
+    # ровно один раз на rectified image. В отличие от CV scoring, OSD получает
+    # исходный rectified image и сам ограничивает его до TEXT_OSD_MAX_SIDE.
     preliminary = _preliminary_orientation_scores(work)
     prelim_rank = sorted(preliminary.items(), key=lambda item: item[1], reverse=True)
     prelim_margin = prelim_rank[0][1] - prelim_rank[1][1]
     visual_is_strong = prelim_rank[0][1] >= 0.38 and prelim_margin >= 0.18
-    text_scores = {0: 0.0, 180: 0.0} if visual_is_strong else _text_direction_scores(scoring_image)
+    text_scores = {0: 0.0, 180: 0.0} if visual_is_strong else _text_direction_scores(image)
 
     hypotheses: list[ProfileHypothesis] = []
     orientation_best = {0: 0.0, 180: 0.0}
