@@ -97,6 +97,7 @@ layout-smoke:
 
 # Калибровка фиксированной камеры по полностью видимому эталону известного
 # ГОСТ-формата. Каждый FORMAT обновляет только свою запись в общем JSON.
+# Разные записи могут относиться к разным FOV/crop входного кадра.
 # Старый одноформатный v1-файл автоматически мигрирует в набор version=2.
 layout-calibrate:
 	@test -n "$(FILE)" || (echo "Использование: make layout-calibrate FILE=/path/reference.jpg FORMAT=C4 [OUT=config/camera-calibration.json]"; exit 2)
@@ -122,12 +123,12 @@ layout-calibrate:
 	rm -f "$$entry"; \
 	trap - EXIT; \
 	echo "Калибровка $(FORMAT) сохранена/обновлена: $$out"; \
-	jq '{version, standard, count:(.calibrations|length), formats:(.calibrations|keys)}' "$$out"
+	jq --arg f "$(FORMAT)" '{version, standard, count:(.calibrations|length), formats:(.calibrations|keys), updated:(.calibrations[$$f] | {reference_format, image_width_px, image_height_px, image_aspect_ratio})}' "$$out"
 
 layout-calibrations:
 	@out="$${OUT:-config/camera-calibration.json}"; \
 	test -s "$$out" || (echo "Файл калибровок не найден: $$out"; exit 2); \
-	jq '{version, standard, count:(if .calibrations then (.calibrations|length) else 1 end), formats:(if .calibrations then (.calibrations|keys) else [.reference_format] end)}' "$$out"
+	jq 'if .calibrations then {version, standard, count:(.calibrations|length), calibrations:(.calibrations | to_entries | map({format:.key, image_width_px:.value.image_width_px, image_height_px:.value.image_height_px, image_aspect_ratio:.value.image_aspect_ratio}))} else {version, standard, count:1, calibrations:[{format:.reference_format, image_width_px, image_height_px, image_aspect_ratio}]} end' "$$out"
 
 # По умолчанию /rectify применяет автоматически определённый поворот 0/180.
 layout-rectify:
