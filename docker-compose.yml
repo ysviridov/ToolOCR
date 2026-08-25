@@ -67,6 +67,9 @@ services:
       OCR_MAX_PIXELS: ${OCR_MAX_PIXELS:-40000000}
       OCR_DEFAULT_LANG: ${OCR_DEFAULT_LANG:-rus+eng}
       OCR_DEFAULT_PSM: ${OCR_DEFAULT_PSM:-11}
+      LAYOUT_CAMERA_CALIBRATION: ${LAYOUT_CAMERA_CALIBRATION:-/app/config/camera-calibration.json}
+    volumes:
+      - ./config:/app/config:ro
     ports:
       - "${TOOLOCR_OCR_PORT:-8090}:8090"
     healthcheck:
