@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 from typing import Iterable, Sequence
 
 import cv2
 import numpy as np
+import pytesseract
+from pytesseract import Output
 
 from .gost_r_51506_99 import DomesticLayout
 from .profiles import ShipmentProfile
@@ -20,6 +23,9 @@ CODE_BAR_WIDTH_MM = 7.0
 CODE_BAR_HEIGHT_MM = 2.0
 CODE_FROM_BOTTOM_MM = 25.0
 SCORING_MAX_SIDE = 1000
+TEXT_OSD_ENABLED = os.environ.get("ORIENTATION_TEXT_OSD", "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +35,10 @@ class HypothesisComponents:
     code_stamp: float
     layout: float
     window: float
+    barcode_layout: float
+    address_layout: float
+    text_direction: float
+    content_orientation: float
     orientation_signal: float
 
 
@@ -41,6 +51,18 @@ class ProfileHypothesis:
     orientation_deg: int
     score: float
     components: HypothesisComponents
+
+
+@dataclass(frozen=True, slots=True)
+class OrientationEvidence:
+    orientation_deg: int
+    postage: float
+    code_stamp: float
+    barcode_layout: float
+    address_layout: float
+    text_direction: float
+    content_orientation: float
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +87,18 @@ class ProfileScoringResult:
     orientation: OrientationDecision
     profile: ProfileDecision
     hypotheses: tuple[ProfileHypothesis, ...]
+    orientation_evidence: tuple[OrientationEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _OrientationWork:
+    oriented: np.ndarray
+    gray: np.ndarray
+    sides: frozenset[str]
+    window_signal: float
+    barcode_layout: float
+    address_layout: float
+    format_features: dict[object, tuple[float, float, float, float]]
 
 
 def _clamp(value: float) -> float:
@@ -97,9 +131,7 @@ def _postage(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str]) 
 
     `sides` намеренно не уменьшает уже обнаруженный visual-сигнал. Контакт
     конверта с краем кадра означает, что физическая граница может быть
-    обрезана, но не означает, что содержимое нормативной зоны невидимо. На
-    реальных кадрах сортировщика жёсткий штраф по frame_contact приводил к
-    инверсии решения 0°/180°.
+    обрезана, но не означает, что содержимое нормативной зоны невидимо.
     """
     _ = sides
     h, w = gray.shape[:2]
@@ -120,12 +152,7 @@ def _postage(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str]) 
 
 
 def _code_stamp(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str]) -> float:
-    """Периодическая гребёнка шестизначного штампа по рисунку Д.1.
-
-    Как и для postage-якоря, frame_contact не является основанием снижать
-    уже найденный структурный сигнал. Если штамп реально обрезан, это
-    естественным образом уменьшит число/качество найденных элементов.
-    """
+    """Периодическая гребёнка шестизначного штампа по рисунку Д.1."""
     _ = sides
     h, w = gray.shape[:2]
     sx, sy = _scale(profile, gray)
@@ -224,6 +251,191 @@ def _window_signal(gray: np.ndarray) -> float:
     return best
 
 
+def _barcode_layout_signal(gray: np.ndarray) -> float:
+    """Ищет крупный линейный barcode и оценивает его положение слева.
+
+    Это не декодирование штрихкода. Для production-кадров полезна только
+    асимметрия расположения: после поворота на 180° левый barcode становится
+    правым. Признак имеет ограниченный вес и не может один решать ориентацию.
+    """
+    h, w = gray.shape[:2]
+    if h < 40 or w < 80:
+        return 0.0
+
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    grad_x = cv2.convertScaleAbs(cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3))
+    grad_y = cv2.convertScaleAbs(cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3))
+    gradient = cv2.subtract(grad_x, grad_y)
+    gradient = cv2.GaussianBlur(gradient, (5, 5), 0)
+    _, binary = cv2.threshold(gradient, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    close_w = max(9, int(round(w * 0.025)))
+    close_h = max(3, int(round(h * 0.010)))
+    closed = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (close_w, close_h)),
+        iterations=2,
+    )
+    closed = cv2.morphologyEx(
+        closed,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    frame_area = float(h * w)
+    best = 0.0
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:40]:
+        x, y, ww, hh = cv2.boundingRect(contour)
+        box_area = float(ww * hh)
+        area_ratio = box_area / frame_area
+        aspect = ww / max(1.0, float(hh))
+        if not 0.0015 <= area_ratio <= 0.12:
+            continue
+        if not 1.4 <= aspect <= 14.0:
+            continue
+        if ww < 0.07 * w or hh < 0.018 * h:
+            continue
+
+        roi_grad = grad_x[y:y + hh, x:x + ww]
+        edge_strength = _clamp(float(np.mean(roi_grad)) / 70.0)
+        size_strength = _clamp(area_ratio / 0.018)
+        center_x = (x + ww / 2.0) / float(w)
+        left_preference = _clamp((0.72 - center_x) / 0.52)
+        strength = (0.58 * edge_strength + 0.42 * size_strength) * left_preference
+        best = max(best, strength)
+    return _clamp(best)
+
+
+def _address_layout_signal(gray: np.ndarray) -> float:
+    """Оценивает каноническое расположение адресных строк без OCR.
+
+    Плотные горизонтальные строки группируются морфологией. Каноническая
+    гипотеза предпочитает небольшой блок отправителя сверху слева и более
+    массивный блок получателя в нижней/правой части. При 180° эта асимметрия
+    меняется местами.
+    """
+    h, w = gray.shape[:2]
+    if h < 40 or w < 80:
+        return 0.0
+
+    ink = (gray < 190).astype(np.uint8) * 255
+    join_w = max(5, int(round(w * 0.012)))
+    joined = cv2.morphologyEx(
+        ink,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (join_w, 3)),
+        iterations=1,
+    )
+    joined = cv2.morphologyEx(
+        joined,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2)),
+        iterations=1,
+    )
+
+    count, _, stats, _ = cv2.connectedComponentsWithStats((joined > 0).astype(np.uint8), 8)
+    samples: list[tuple[float, float, float]] = []
+    total_mass = 0.0
+    for stat in stats[1:count]:
+        x, y, ww, hh, area = (float(v) for v in stat)
+        aspect = ww / max(1.0, hh)
+        if not 0.035 * w <= ww <= 0.65 * w:
+            continue
+        if not 0.006 * h <= hh <= 0.09 * h:
+            continue
+        if aspect < 2.0:
+            continue
+        cx = (x + ww / 2.0) / float(w)
+        cy = (y + hh / 2.0) / float(h)
+        mass = max(area, 0.35 * ww * hh)
+        samples.append((cx, cy, mass))
+        total_mass += mass
+
+    if len(samples) < 2 or total_mass <= 0:
+        return 0.0
+
+    def gaussian(cx: float, cy: float, tx: float, ty: float, sx: float, sy: float) -> float:
+        return math.exp(-0.5 * (((cx - tx) / sx) ** 2 + ((cy - ty) / sy) ** 2))
+
+    preferred = 0.0
+    opposite = 0.0
+    for cx, cy, mass in samples:
+        sender = gaussian(cx, cy, 0.27, 0.27, 0.27, 0.25)
+        recipient = gaussian(cx, cy, 0.68, 0.67, 0.27, 0.27)
+        wrong_upper_right = gaussian(cx, cy, 0.73, 0.27, 0.27, 0.25)
+        wrong_lower_left = gaussian(cx, cy, 0.32, 0.67, 0.27, 0.27)
+        preferred += mass * (0.34 * sender + 0.66 * recipient)
+        opposite += mass * (0.34 * wrong_upper_right + 0.66 * wrong_lower_left)
+
+    preferred /= total_mass
+    opposite /= total_mass
+    presence = _clamp(total_mass / max(1.0, 0.010 * h * w))
+    contrast = _clamp((preferred - opposite + 0.18) / 0.48)
+    return _clamp(presence * (0.55 * preferred + 0.45 * contrast))
+
+
+def _text_direction_scores(image: np.ndarray) -> dict[int, float]:
+    """Определяет 0/180 по направлению текста через Tesseract OSD.
+
+    OSD запускается максимум один раз на письмо и только для сложных случаев.
+    Если текста мало, OSD недоступен или возвращает 90/270°, канал считается
+    отсутствующим и не влияет на решение.
+    """
+    scores = {0: 0.0, 180: 0.0}
+    if not TEXT_OSD_ENABLED:
+        return scores
+    try:
+        result = pytesseract.image_to_osd(image, output_type=Output.DICT)
+        rotate = int(result.get("rotate", -1)) % 360
+        confidence = float(result.get("orientation_conf", 0.0) or 0.0)
+    except (pytesseract.TesseractError, pytesseract.TesseractNotFoundError, TypeError, ValueError):
+        return scores
+
+    if rotate not in (0, 180):
+        return scores
+    # В документации Tesseract ~15 считается уверенным orientation confidence.
+    strength = _clamp(confidence / 15.0)
+    if strength < 0.12:
+        return scores
+    scores[rotate] = strength
+    return scores
+
+
+def _content_orientation_signal(
+    barcode_layout: float,
+    address_layout: float,
+    text_direction: float,
+) -> float:
+    """Третий независимый канал ориентации: barcode + адреса + направление текста."""
+    cv_layout = _clamp(0.46 * barcode_layout + 0.54 * address_layout)
+    # Сильный OSD способен дать самостоятельное свидетельство, но CV-layout
+    # сохраняется как независимая страховка для рукописных/малотекстовых писем.
+    return _clamp(max(cv_layout, 0.84 * text_direction, 0.58 * cv_layout + 0.42 * text_direction))
+
+
+def _orientation_signal(
+    postage: float,
+    code_stamp: float,
+    content_orientation: float,
+) -> float:
+    """Fusion трёх независимых каналов для 0°/180°.
+
+    Один ложный postage или code-stamp теперь принципиально не проходит порог
+    самостоятельно. Сильный content_orientation может решить машинное письмо,
+    где ГОСТ-кодовый штамп отсутствует.
+    """
+    anchor_agreement = math.sqrt(max(0.0, postage * code_stamp))
+    return _clamp(
+        0.24 * postage
+        + 0.20 * code_stamp
+        + 0.46 * content_orientation
+        + 0.10 * anchor_agreement
+    )
+
+
 def _resize_for_scoring(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
     scale = min(1.0, SCORING_MAX_SIDE / float(max(h, w)))
@@ -236,16 +448,48 @@ def _resize_for_scoring(image: np.ndarray) -> np.ndarray:
     )
 
 
-def _orientation_signal(postage: float, code_stamp: float) -> float:
-    """Согласованный сигнал ориентации по двум асимметричным ГОСТ-якорям.
+def _prepare_orientation_work(
+    scoring_image: np.ndarray,
+    profile_list: tuple[ShipmentProfile, ...],
+    frame_contact_sides: Sequence[str],
+    partial: bool,
+) -> dict[int, _OrientationWork]:
+    work: dict[int, _OrientationWork] = {}
+    for orientation in (0, 180):
+        oriented = scoring_image if orientation == 0 else cv2.rotate(scoring_image, cv2.ROTATE_180)
+        gray = cv2.cvtColor(oriented, cv2.COLOR_BGR2GRAY)
+        sides = _contacts(frame_contact_sides, orientation)
+        format_features: dict[object, tuple[float, float, float, float]] = {}
+        for profile in profile_list:
+            if profile.format not in format_features:
+                format_features[profile.format] = (
+                    _aspect(profile, oriented, partial),
+                    _postage(gray, profile, sides),
+                    _code_stamp(gray, profile, sides),
+                    _line_signal(gray, profile),
+                )
+        work[orientation] = _OrientationWork(
+            oriented=oriented,
+            gray=gray,
+            sides=sides,
+            window_signal=_window_signal(gray),
+            barcode_layout=_barcode_layout_signal(gray),
+            address_layout=_address_layout_signal(gray),
+            format_features=format_features,
+        )
+    return work
 
-    Один очень тёмный/текстурный участок в правом верхнем углу не должен
-    самостоятельно решать ориентацию: перевёрнутый кодовый штамп или штрихкод
-    может выглядеть как поле марки. Поэтому треть веса — это совместное
-    присутствие обоих ожидаемых якорей (геометрическое среднее).
-    """
-    agreement = math.sqrt(max(0.0, postage * code_stamp))
-    return _clamp(0.42 * postage + 0.38 * code_stamp + 0.20 * agreement)
+
+def _preliminary_orientation_scores(work: dict[int, _OrientationWork]) -> dict[int, float]:
+    scores = {0: 0.0, 180: 0.0}
+    for orientation, item in work.items():
+        content = _content_orientation_signal(item.barcode_layout, item.address_layout, 0.0)
+        for _, postage, code_stamp, _ in item.format_features.values():
+            scores[orientation] = max(
+                scores[orientation],
+                _orientation_signal(postage, code_stamp, content),
+            )
+    return scores
 
 
 def score_gost_profiles(
@@ -265,33 +509,54 @@ def score_gost_profiles(
 
     scoring_image = _resize_for_scoring(image)
     partial = bool(frame_contact_sides)
+    work = _prepare_orientation_work(
+        scoring_image,
+        profile_list,
+        frame_contact_sides,
+        partial,
+    )
+
+    # OSD — более дорогой этап. На простых письмах, где visual evidence уже
+    # имеет хороший запас, он не запускается. В остальных случаях выполняется
+    # ровно один раз на rectified image.
+    preliminary = _preliminary_orientation_scores(work)
+    prelim_rank = sorted(preliminary.items(), key=lambda item: item[1], reverse=True)
+    prelim_margin = prelim_rank[0][1] - prelim_rank[1][1]
+    visual_is_strong = prelim_rank[0][1] >= 0.38 and prelim_margin >= 0.18
+    text_scores = {0: 0.0, 180: 0.0} if visual_is_strong else _text_direction_scores(scoring_image)
+
     hypotheses: list[ProfileHypothesis] = []
     orientation_best = {0: 0.0, 180: 0.0}
+    evidence_best: dict[int, OrientationEvidence] = {}
 
     for orientation in (0, 180):
-        oriented = scoring_image if orientation == 0 else cv2.rotate(scoring_image, cv2.ROTATE_180)
-        gray = cv2.cvtColor(oriented, cv2.COLOR_BGR2GRAY)
-        sides = _contacts(frame_contact_sides, orientation)
-        window_signal = _window_signal(gray)
+        item = work[orientation]
+        text_direction = text_scores[orientation]
+        content_orientation = _content_orientation_signal(
+            item.barcode_layout,
+            item.address_layout,
+            text_direction,
+        )
 
-        # Тяжёлые признаки считаются один раз на физический формат, а не на
-        # каждый вариант I/II и window/no-window.
-        format_features: dict[object, tuple[float, float, float, float]] = {}
         for profile in profile_list:
-            if profile.format not in format_features:
-                format_features[profile.format] = (
-                    _aspect(profile, oriented, partial),
-                    _postage(gray, profile, sides),
-                    _code_stamp(gray, profile, sides),
-                    _line_signal(gray, profile),
+            aspect, postage, code_stamp, line_signal = item.format_features[profile.format]
+            layout = line_signal if profile.layout == DomesticLayout.LINES else 1.0 - line_signal
+            window = item.window_signal if profile.window else 1.0 - item.window_signal
+            orientation_signal = _orientation_signal(postage, code_stamp, content_orientation)
+
+            if orientation_signal > orientation_best[orientation]:
+                orientation_best[orientation] = orientation_signal
+                evidence_best[orientation] = OrientationEvidence(
+                    orientation_deg=orientation,
+                    postage=round(postage, 4),
+                    code_stamp=round(code_stamp, 4),
+                    barcode_layout=round(item.barcode_layout, 4),
+                    address_layout=round(item.address_layout, 4),
+                    text_direction=round(text_direction, 4),
+                    content_orientation=round(content_orientation, 4),
+                    score=round(orientation_signal, 4),
                 )
 
-        for profile in profile_list:
-            aspect, postage, code_stamp, line_signal = format_features[profile.format]
-            layout = line_signal if profile.layout == DomesticLayout.LINES else 1.0 - line_signal
-            window = window_signal if profile.window else 1.0 - window_signal
-            orientation_signal = _orientation_signal(postage, code_stamp)
-            orientation_best[orientation] = max(orientation_best[orientation], orientation_signal)
             weights = (0.08, 0.27, 0.28, 0.23, 0.14) if partial else (0.20, 0.23, 0.24, 0.20, 0.13)
             score = _clamp(
                 weights[0] * aspect + weights[1] * postage + weights[2] * code_stamp
@@ -306,9 +571,16 @@ def score_gost_profiles(
                     orientation_deg=orientation,
                     score=round(score, 4),
                     components=HypothesisComponents(
-                        aspect=round(aspect, 4), postage=round(postage, 4),
-                        code_stamp=round(code_stamp, 4), layout=round(layout, 4),
-                        window=round(window, 4), orientation_signal=round(orientation_signal, 4),
+                        aspect=round(aspect, 4),
+                        postage=round(postage, 4),
+                        code_stamp=round(code_stamp, 4),
+                        layout=round(layout, 4),
+                        window=round(window, 4),
+                        barcode_layout=round(item.barcode_layout, 4),
+                        address_layout=round(item.address_layout, 4),
+                        text_direction=round(text_direction, 4),
+                        content_orientation=round(content_orientation, 4),
+                        orientation_signal=round(orientation_signal, 4),
                     ),
                 )
             )
@@ -340,8 +612,34 @@ def score_gost_profiles(
         confidence=round(_clamp(0.72 * best.score + 0.28 * _clamp(profile_margin / 0.15)), 4),
         margin=round(profile_margin, 4),
     )
+
+    evidence = tuple(
+        evidence_best.get(
+            degree,
+            OrientationEvidence(
+                orientation_deg=degree,
+                postage=0.0,
+                code_stamp=0.0,
+                barcode_layout=round(work[degree].barcode_layout, 4),
+                address_layout=round(work[degree].address_layout, 4),
+                text_direction=round(text_scores[degree], 4),
+                content_orientation=round(
+                    _content_orientation_signal(
+                        work[degree].barcode_layout,
+                        work[degree].address_layout,
+                        text_scores[degree],
+                    ),
+                    4,
+                ),
+                score=round(orientation_best[degree], 4),
+            ),
+        )
+        for degree in (0, 180)
+    )
+
     return ProfileScoringResult(
         orientation=orientation_decision,
         profile=profile_decision,
         hypotheses=tuple(sorted(hypotheses, key=lambda h: h.score, reverse=True)),
+        orientation_evidence=evidence,
     )
