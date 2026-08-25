@@ -13,7 +13,6 @@ from .gost_r_51506_99 import ENVELOPE_SPECS, GOST_ID, candidate_formats_by_aspec
 from .layout import EnvelopeNotFoundError, detect_envelope_quad, draw_detection_overlay, rectify_envelope
 from .profiles import DOMESTIC_PROFILES, profiles_for_format
 
-
 router = APIRouter(prefix="/v1/layout", tags=["layout"])
 MAX_UPLOAD_MB = int(os.environ.get("OCR_MAX_UPLOAD_MB", "20"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -87,6 +86,7 @@ async def analyze_layout(
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
 ) -> dict[str, Any]:
     total_started = time.perf_counter()
+
     decode_started = time.perf_counter()
     raw, image = await _read_and_decode(file)
     decode_ms = (time.perf_counter() - decode_started) * 1000.0
@@ -97,11 +97,7 @@ async def analyze_layout(
     except EnvelopeNotFoundError as exc:
         raise HTTPException(
             status_code=422,
-            detail={
-                "layout_status": "reject",
-                "reason": "envelope_quad_not_found",
-                "message": str(exc),
-            },
+            detail={"layout_status": "reject", "reason": "envelope_quad_not_found", "message": str(exc)},
         ) from exc
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
 
@@ -120,7 +116,9 @@ async def analyze_layout(
         for profile in profiles_for_format(candidate.format):
             profile_candidates.append(_profile_to_dict(profile, candidate.ratio_error))
 
-    if not format_candidates:
+    if detection.frame_contact_sides:
+        format_status = "unreliable_partial_frame"
+    elif not format_candidates:
         format_status = "unknown"
     elif len(format_candidates) == 1:
         format_status = "resolved_by_ratio"
@@ -212,12 +210,9 @@ async def rectify_image(
     except EnvelopeNotFoundError as exc:
         raise HTTPException(
             status_code=422,
-            detail={
-                "layout_status": "reject",
-                "reason": "envelope_quad_not_found",
-                "message": str(exc),
-            },
+            detail={"layout_status": "reject", "reason": "envelope_quad_not_found", "message": str(exc)},
         ) from exc
+
     rectified = rectify_envelope(image, detection.points)
     ok, encoded = cv2.imencode(".jpg", rectified.image, [cv2.IMWRITE_JPEG_QUALITY, 94])
     if not ok:
