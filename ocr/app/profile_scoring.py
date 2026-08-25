@@ -93,7 +93,15 @@ def _aspect(profile: ShipmentProfile, image: np.ndarray, partial: bool) -> float
 
 
 def _postage(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str]) -> float:
-    """Поле 40×25 мм у верхней правой угловой метки, без OCR."""
+    """Поле 40×25 мм у верхней правой угловой метки, без OCR.
+
+    `sides` намеренно не уменьшает уже обнаруженный visual-сигнал. Контакт
+    конверта с краем кадра означает, что физическая граница может быть
+    обрезана, но не означает, что содержимое нормативной зоны невидимо. На
+    реальных кадрах сортировщика жёсткий штраф по frame_contact приводил к
+    инверсии решения 0°/180°.
+    """
+    _ = sides
     h, w = gray.shape[:2]
     sx, sy = _scale(profile, gray)
     fw, fh = POSTAGE_FIELD_MM
@@ -108,13 +116,17 @@ def _postage(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str]) 
     dark = float(np.mean(region < 175))
     texture = _clamp(float(np.std(region)) / 55.0)
     score = 0.72 * _clamp((dark - 0.015) / 0.30) + 0.28 * texture
-    if {"top", "right"} & sides:
-        score *= 0.45
     return _clamp(score)
 
 
 def _code_stamp(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str]) -> float:
-    """Периодическая гребёнка шестизначного штампа по рисунку Д.1."""
+    """Периодическая гребёнка шестизначного штампа по рисунку Д.1.
+
+    Как и для postage-якоря, frame_contact не является основанием снижать
+    уже найденный структурный сигнал. Если штамп реально обрезан, это
+    естественным образом уменьшит число/качество найденных элементов.
+    """
+    _ = sides
     h, w = gray.shape[:2]
     sx, sy = _scale(profile, gray)
     y_min = max(0, int(round(h - 45.0 * sy)))
@@ -162,8 +174,6 @@ def _code_stamp(gray: np.ndarray, profile: ShipmentProfile, sides: frozenset[str
         phase_score = math.exp(-float(np.mean(phase))) if phase else 0.0
         best = max(best, count_score * (0.34 * width_score + 0.14 * height_score + 0.24 * y_score + 0.28 * phase_score))
 
-    if "bottom" in sides:
-        best *= 0.55
     return _clamp(best)
 
 
@@ -226,6 +236,18 @@ def _resize_for_scoring(image: np.ndarray) -> np.ndarray:
     )
 
 
+def _orientation_signal(postage: float, code_stamp: float) -> float:
+    """Согласованный сигнал ориентации по двум асимметричным ГОСТ-якорям.
+
+    Один очень тёмный/текстурный участок в правом верхнем углу не должен
+    самостоятельно решать ориентацию: перевёрнутый кодовый штамп или штрихкод
+    может выглядеть как поле марки. Поэтому треть веса — это совместное
+    присутствие обоих ожидаемых якорей (геометрическое среднее).
+    """
+    agreement = math.sqrt(max(0.0, postage * code_stamp))
+    return _clamp(0.42 * postage + 0.38 * code_stamp + 0.20 * agreement)
+
+
 def score_gost_profiles(
     image: np.ndarray,
     profiles: Iterable[ShipmentProfile],
@@ -268,7 +290,7 @@ def score_gost_profiles(
             aspect, postage, code_stamp, line_signal = format_features[profile.format]
             layout = line_signal if profile.layout == DomesticLayout.LINES else 1.0 - line_signal
             window = window_signal if profile.window else 1.0 - window_signal
-            orientation_signal = _clamp(0.58 * postage + 0.42 * code_stamp)
+            orientation_signal = _orientation_signal(postage, code_stamp)
             orientation_best[orientation] = max(orientation_best[orientation], orientation_signal)
             weights = (0.08, 0.27, 0.28, 0.23, 0.14) if partial else (0.20, 0.23, 0.24, 0.20, 0.13)
             score = _clamp(
