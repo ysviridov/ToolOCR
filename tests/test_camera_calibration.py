@@ -137,7 +137,7 @@ def test_same_fov_at_double_resolution_keeps_metric_size():
     assert abs(measurement.height_mm - 162.0) < 0.5
 
 
-def test_changed_frame_aspect_ratio_rejects_calibration():
+def test_changed_frame_aspect_ratio_rejects_legacy_homography_mode():
     calibration = _calibration_c4()
     quad = _world_rect_to_image(calibration, 0.0, 0.0, 229.0, 162.0)
 
@@ -162,6 +162,7 @@ def test_v2_set_keeps_c4_and_c5_entries(tmp_path):
     assert {item.reference_format for item in loaded} == {"C4", "C5"}
     assert payload["version"] == 2
     assert set(payload["calibrations"]) == {"C4", "C5"}
+    assert payload["calibrations"]["C4"]["metric_mode"] == "quad_pixel_scale"
 
 
 def test_v1_single_calibration_is_backward_compatible(tmp_path):
@@ -173,6 +174,34 @@ def test_v1_single_calibration_is_backward_compatible(tmp_path):
 
     assert len(loaded) == 1
     assert loaded[0].reference_format == "C4"
+
+
+def test_old_v1_without_pixel_scale_recovers_scale_from_homography(tmp_path):
+    c4 = _calibration_c4()
+    payload = calibration_to_dict(c4)
+    for key in (
+        "reference_width_px",
+        "reference_height_px",
+        "px_per_mm_x",
+        "px_per_mm_y",
+        "metric_mode",
+    ):
+        payload.pop(key, None)
+    path = tmp_path / "camera-calibration.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_plane_calibrations(path)
+    dl = ENVELOPE_SPECS[EnvelopeFormat.DL]
+    quad = _world_rect_to_image(c4, 55.0, 40.0, dl.width_mm, dl.height_mm)
+    consensus = measure_quad_mm_consensus(
+        loaded,
+        quad,
+        image_width_px=1733,
+        image_height_px=1200,
+    )
+
+    assert abs(consensus.measurement.width_mm - 220.0) < 1.0
+    assert abs(consensus.measurement.height_mm - 110.0) < 1.0
 
 
 def test_consensus_uses_multiple_reference_formats():
@@ -197,3 +226,26 @@ def test_consensus_uses_multiple_reference_formats():
     assert abs(consensus.measurement.height_mm - 110.0) < 0.5
     assert decision.status == "resolved"
     assert decision.format == EnvelopeFormat.DL
+
+
+def test_pixel_scale_consensus_ignores_black_frame_width():
+    """Полный JPEG может быть 3720/3736/3752 px, если quad не масштабирован."""
+    c4 = _calibration_c4()
+    c5 = _calibration_c5_same_plane()
+    target = ENVELOPE_SPECS[EnvelopeFormat.C5]
+    quad = _world_rect_to_image(c4, 45.0, 35.0, target.width_mm, target.height_mm)
+
+    measurements = []
+    for source_width in (1588, 1600, 1614, 1632):
+        consensus = measure_quad_mm_consensus(
+            (c4, c5),
+            quad,
+            image_width_px=source_width,
+            image_height_px=IMAGE_H,
+        )
+        measurements.append((consensus.measurement.width_mm, consensus.measurement.height_mm))
+
+    assert max(width for width, _ in measurements) - min(width for width, _ in measurements) < 0.01
+    assert max(height for _, height in measurements) - min(height for _, height in measurements) < 0.01
+    assert abs(measurements[0][0] - 229.0) < 0.6
+    assert abs(measurements[0][1] - 162.0) < 0.6
