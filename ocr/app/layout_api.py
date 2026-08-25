@@ -108,8 +108,25 @@ def _hypothesis_to_dict(hypothesis: ProfileHypothesis) -> dict[str, Any]:
             "code_stamp": components.code_stamp,
             "layout": components.layout,
             "window": components.window,
+            "barcode_layout": components.barcode_layout,
+            "address_layout": components.address_layout,
+            "text_direction": components.text_direction,
+            "content_orientation": components.content_orientation,
             "orientation_signal": components.orientation_signal,
         },
+    }
+
+
+def _orientation_evidence_to_dict(evidence: Any) -> dict[str, Any]:
+    return {
+        "orientation_deg": evidence.orientation_deg,
+        "postage": evidence.postage,
+        "code_stamp": evidence.code_stamp,
+        "barcode_layout": evidence.barcode_layout,
+        "address_layout": evidence.address_layout,
+        "text_direction": evidence.text_direction,
+        "content_orientation": evidence.content_orientation,
+        "score": evidence.score,
     }
 
 
@@ -508,6 +525,10 @@ async def analyze_layout(
             "scores": [
                 {"orientation_deg": degree, "score": score}
                 for degree, score in scoring.orientation.scores
+            ],
+            "evidence": [
+                _orientation_evidence_to_dict(item)
+                for item in scoring.orientation_evidence
             ],
         },
         "format_status": format_status,
