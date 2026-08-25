@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import os
 from typing import Iterable, Sequence
@@ -27,6 +27,22 @@ TEXT_OSD_MAX_SIDE = max(1000, int(os.environ.get("ORIENTATION_TEXT_OSD_MAX_SIDE"
 TEXT_OSD_ENABLED = os.environ.get("ORIENTATION_TEXT_OSD", "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
+
+# Contrast-aware fusion. Абсолютные сигналы сохраняются как основной score,
+# а эти коэффициенты лишь увеличивают разрыв между 0°/180°, когда независимый
+# признак действительно различает две гипотезы.
+CONTRAST_CHANNEL_WEIGHTS = {
+    "postage": 0.18,
+    "code_stamp": 0.20,
+    "barcode_layout": 0.20,
+    "address_layout": 0.12,
+    "text_direction": 0.30,
+}
+CONTRAST_BONUS_SCALE = 0.20
+CONTRAST_BONUS_MAX = 0.08
+AGREEMENT_DELTA_MIN = 0.06
+AGREEMENT_BONUS_SCALE = 0.25
+AGREEMENT_BONUS_MAX = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +79,15 @@ class OrientationEvidence:
     address_layout: float
     text_direction: float
     content_orientation: float
+    base_score: float
+    postage_delta: float
+    code_stamp_delta: float
+    barcode_delta: float
+    address_delta: float
+    text_delta: float
+    contrast_bonus: float
+    agreement_bonus: float
+    agreement_channels: int
     score: float
 
 
@@ -100,6 +125,19 @@ class _OrientationWork:
     barcode_layout: float
     address_layout: float
     format_features: dict[object, tuple[float, float, float, float]]
+
+
+@dataclass(frozen=True, slots=True)
+class _FusionAdjustment:
+    postage_delta: float
+    code_stamp_delta: float
+    barcode_delta: float
+    address_delta: float
+    text_delta: float
+    contrast_bonus: float
+    agreement_bonus: float
+    agreement_channels: int
+    score: float
 
 
 def _clamp(value: float) -> float:
@@ -453,6 +491,65 @@ def _orientation_signal(
     )
 
 
+def _contrast_aware_fusion(
+    base_scores: dict[int, float],
+    evidence: dict[int, OrientationEvidence],
+) -> dict[int, _FusionAdjustment]:
+    """Добавляет направленный contrast и agreement bonus к 0°/180°.
+
+    Высокое абсолютное значение признака само по себе не считается полезным,
+    если оно почти такое же у противоположной гипотезы. Для каждого канала
+    используется только положительная разница current - opposite. Agreement
+    начисляется, когда хотя бы два независимых канала имеют delta >= 0.06.
+
+    Бонусы намеренно ограничены: contrast <= 0.08, agreement <= 0.10. Поэтому
+    слой увеличивает margin у согласованных гипотез, но не заменяет исходные
+    ГОСТ/content сигналы и не меняет пороги принятия решения.
+    """
+    result: dict[int, _FusionAdjustment] = {}
+    for degree, opposite in ((0, 180), (180, 0)):
+        current = evidence[degree]
+        other = evidence[opposite]
+        deltas = {
+            "postage": max(0.0, current.postage - other.postage),
+            "code_stamp": max(0.0, current.code_stamp - other.code_stamp),
+            "barcode_layout": max(0.0, current.barcode_layout - other.barcode_layout),
+            "address_layout": max(0.0, current.address_layout - other.address_layout),
+            "text_direction": max(0.0, current.text_direction - other.text_direction),
+        }
+        weighted_delta = sum(
+            CONTRAST_CHANNEL_WEIGHTS[name] * value
+            for name, value in deltas.items()
+        )
+        contrast_bonus = min(CONTRAST_BONUS_MAX, CONTRAST_BONUS_SCALE * weighted_delta)
+
+        supporting = sorted(
+            (value for value in deltas.values() if value >= AGREEMENT_DELTA_MIN),
+            reverse=True,
+        )
+        agreement_channels = len(supporting)
+        agreement_bonus = 0.0
+        if agreement_channels >= 2:
+            agreement_bonus = min(
+                AGREEMENT_BONUS_MAX,
+                AGREEMENT_BONUS_SCALE * math.sqrt(supporting[0] * supporting[1]),
+            )
+
+        final_score = _clamp(base_scores[degree] + contrast_bonus + agreement_bonus)
+        result[degree] = _FusionAdjustment(
+            postage_delta=deltas["postage"],
+            code_stamp_delta=deltas["code_stamp"],
+            barcode_delta=deltas["barcode_layout"],
+            address_delta=deltas["address_layout"],
+            text_delta=deltas["text_direction"],
+            contrast_bonus=contrast_bonus,
+            agreement_bonus=agreement_bonus,
+            agreement_channels=agreement_channels,
+            score=final_score,
+        )
+    return result
+
+
 def _resize_for_scoring(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
     scale = min(1.0, SCORING_MAX_SIDE / float(max(h, w)))
@@ -572,6 +669,15 @@ def score_gost_profiles(
                     address_layout=round(item.address_layout, 4),
                     text_direction=round(text_direction, 4),
                     content_orientation=round(content_orientation, 4),
+                    base_score=round(orientation_signal, 4),
+                    postage_delta=0.0,
+                    code_stamp_delta=0.0,
+                    barcode_delta=0.0,
+                    address_delta=0.0,
+                    text_delta=0.0,
+                    contrast_bonus=0.0,
+                    agreement_bonus=0.0,
+                    agreement_channels=0,
                     score=round(orientation_signal, 4),
                 )
 
@@ -603,6 +709,54 @@ def score_gost_profiles(
                 )
             )
 
+    # Нормально при непустом profile_list обе гипотезы имеют evidence. Fallback
+    # оставлен для защитного поведения при будущих изменениях scoring.
+    for degree in (0, 180):
+        if degree not in evidence_best:
+            content = _content_orientation_signal(
+                work[degree].barcode_layout,
+                work[degree].address_layout,
+                text_scores[degree],
+            )
+            evidence_best[degree] = OrientationEvidence(
+                orientation_deg=degree,
+                postage=0.0,
+                code_stamp=0.0,
+                barcode_layout=round(work[degree].barcode_layout, 4),
+                address_layout=round(work[degree].address_layout, 4),
+                text_direction=round(text_scores[degree], 4),
+                content_orientation=round(content, 4),
+                base_score=round(orientation_best[degree], 4),
+                postage_delta=0.0,
+                code_stamp_delta=0.0,
+                barcode_delta=0.0,
+                address_delta=0.0,
+                text_delta=0.0,
+                contrast_bonus=0.0,
+                agreement_bonus=0.0,
+                agreement_channels=0,
+                score=round(orientation_best[degree], 4),
+            )
+
+    base_orientation_best = dict(orientation_best)
+    fusion = _contrast_aware_fusion(base_orientation_best, evidence_best)
+    for degree in (0, 180):
+        adjustment = fusion[degree]
+        evidence_best[degree] = replace(
+            evidence_best[degree],
+            base_score=round(base_orientation_best[degree], 4),
+            postage_delta=round(adjustment.postage_delta, 4),
+            code_stamp_delta=round(adjustment.code_stamp_delta, 4),
+            barcode_delta=round(adjustment.barcode_delta, 4),
+            address_delta=round(adjustment.address_delta, 4),
+            text_delta=round(adjustment.text_delta, 4),
+            contrast_bonus=round(adjustment.contrast_bonus, 4),
+            agreement_bonus=round(adjustment.agreement_bonus, 4),
+            agreement_channels=adjustment.agreement_channels,
+            score=round(adjustment.score, 4),
+        )
+        orientation_best[degree] = adjustment.score
+
     orientation_rank = sorted(orientation_best.items(), key=lambda item: item[1], reverse=True)
     best_deg, best_signal = orientation_rank[0]
     margin = best_signal - orientation_rank[1][1]
@@ -631,33 +785,9 @@ def score_gost_profiles(
         margin=round(profile_margin, 4),
     )
 
-    evidence = tuple(
-        evidence_best.get(
-            degree,
-            OrientationEvidence(
-                orientation_deg=degree,
-                postage=0.0,
-                code_stamp=0.0,
-                barcode_layout=round(work[degree].barcode_layout, 4),
-                address_layout=round(work[degree].address_layout, 4),
-                text_direction=round(text_scores[degree], 4),
-                content_orientation=round(
-                    _content_orientation_signal(
-                        work[degree].barcode_layout,
-                        work[degree].address_layout,
-                        text_scores[degree],
-                    ),
-                    4,
-                ),
-                score=round(orientation_best[degree], 4),
-            ),
-        )
-        for degree in (0, 180)
-    )
-
     return ProfileScoringResult(
         orientation=orientation_decision,
         profile=profile_decision,
         hypotheses=tuple(sorted(hypotheses, key=lambda h: h.score, reverse=True)),
-        orientation_evidence=evidence,
+        orientation_evidence=tuple(evidence_best[degree] for degree in (0, 180)),
     )
