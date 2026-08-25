@@ -1,3 +1,5 @@
+import json
+
 import cv2
 import numpy as np
 import pytest
@@ -5,8 +7,12 @@ import pytest
 from ocr.app.camera_calibration import (
     CameraCalibrationError,
     build_plane_calibration,
+    calibration_set_to_dict,
+    calibration_to_dict,
+    load_plane_calibrations,
     match_format_by_metric,
     measure_quad_mm,
+    measure_quad_mm_consensus,
 )
 from ocr.app.gost_r_51506_99 import ENVELOPE_SPECS, GOST_ID, EnvelopeFormat
 
@@ -55,6 +61,19 @@ def _world_rect_to_image(calibration, x_mm, y_mm, width_mm, height_mm, *, scale=
     return result.astype(np.float32)
 
 
+def _calibration_c5_same_plane():
+    base = _calibration_c4()
+    spec = ENVELOPE_SPECS[EnvelopeFormat.C5]
+    quad = _world_rect_to_image(base, 35.0, 28.0, spec.width_mm, spec.height_mm)
+    return build_plane_calibration(
+        quad,
+        image_width_px=IMAGE_W,
+        image_height_px=IMAGE_H,
+        spec=spec,
+        standard=GOST_ID,
+    )
+
+
 def test_metric_calibration_distinguishes_c5_from_c4_and_b4():
     calibration = _calibration_c4()
     c5 = ENVELOPE_SPECS[EnvelopeFormat.C5]
@@ -77,8 +96,6 @@ def test_metric_calibration_distinguishes_c5_from_c4_and_b4():
 
 def test_partial_bottom_c4_is_resolved_by_full_width():
     calibration = _calibration_c4()
-    # Нижняя физическая часть C4 не попала в кадр: наблюдаем только 180 мм
-    # высоты, но полная ширина 324 мм сохранилась.
     quad = _world_rect_to_image(calibration, 0.0, 0.0, 324.0, 180.0)
 
     measurement = measure_quad_mm(
@@ -131,3 +148,52 @@ def test_changed_frame_aspect_ratio_rejects_calibration():
             image_width_px=1600,
             image_height_px=1000,
         )
+
+
+def test_v2_set_keeps_c4_and_c5_entries(tmp_path):
+    c4 = _calibration_c4()
+    c5 = _calibration_c5_same_plane()
+    payload = calibration_set_to_dict((c4, c5))
+    path = tmp_path / "camera-calibration.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_plane_calibrations(path)
+
+    assert {item.reference_format for item in loaded} == {"C4", "C5"}
+    assert payload["version"] == 2
+    assert set(payload["calibrations"]) == {"C4", "C5"}
+
+
+def test_v1_single_calibration_is_backward_compatible(tmp_path):
+    c4 = _calibration_c4()
+    path = tmp_path / "camera-calibration.json"
+    path.write_text(json.dumps(calibration_to_dict(c4)), encoding="utf-8")
+
+    loaded = load_plane_calibrations(path)
+
+    assert len(loaded) == 1
+    assert loaded[0].reference_format == "C4"
+
+
+def test_consensus_uses_multiple_reference_formats():
+    c4 = _calibration_c4()
+    c5 = _calibration_c5_same_plane()
+    dl = ENVELOPE_SPECS[EnvelopeFormat.DL]
+    quad = _world_rect_to_image(c4, 55.0, 40.0, dl.width_mm, dl.height_mm)
+
+    consensus = measure_quad_mm_consensus(
+        (c4, c5),
+        quad,
+        image_width_px=IMAGE_W,
+        image_height_px=IMAGE_H,
+    )
+    decision = match_format_by_metric(consensus.measurement)
+
+    assert consensus.consistent is True
+    assert set(consensus.reference_formats) == {"C4", "C5"}
+    assert consensus.width_spread_mm < 0.5
+    assert consensus.height_spread_mm < 0.5
+    assert abs(consensus.measurement.width_mm - 220.0) < 0.5
+    assert abs(consensus.measurement.height_mm - 110.0) < 0.5
+    assert decision.status == "resolved"
+    assert decision.format == EnvelopeFormat.DL
