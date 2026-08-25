@@ -85,18 +85,18 @@ ocr-smoke:
 
 # Stage 2.1: геометрия полного письма и ГОСТ-профили.
 layout-profiles:
-	@curl --fail --silent --show-error \
+	@curl --fail-with-body --silent --show-error \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/profiles"
 
 layout-smoke:
 	@test -n "$(FILE)" || (echo "Использование: make layout-smoke FILE=/path/full-envelope.jpg"; exit 2)
-	@curl --fail --silent --show-error -X POST \
+	@curl --fail-with-body --silent --show-error -X POST \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/analyze" \
 		-F "file=@$(abspath $(FILE))"
 
 layout-rectify:
 	@test -n "$(FILE)" || (echo "Использование: make layout-rectify FILE=/path/full-envelope.jpg [OUT=/tmp/rectified.jpg]"; exit 2)
-	@curl --fail --silent --show-error -X POST \
+	@curl --fail-with-body --silent --show-error -X POST \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/rectify" \
 		-F "file=@$(abspath $(FILE))" \
 		-o "$${OUT:-/tmp/toolocr-rectified.jpg}"
