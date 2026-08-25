@@ -6,7 +6,7 @@ TOOLOCR_OCR_PORT ?= 8090
 .PHONY: db-up db-down db-logs db-shell import update datasets activate prune reset \
         migrate-stage11 check-stage11 api-up api-down api-logs api-smoke \
         ocr-up ocr-down ocr-logs ocr-health ocr-smoke \
-        layout-profiles layout-smoke layout-rectify test
+        layout-profiles layout-smoke layout-rectify layout-rectify-raw test
 
 db-up:
 	$(COMPOSE) up -d db
@@ -94,13 +94,23 @@ layout-smoke:
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/analyze" \
 		-F "file=@$(abspath $(FILE))"
 
+# По умолчанию /rectify применяет автоматически определённый поворот 0/180.
 layout-rectify:
 	@test -n "$(FILE)" || (echo "Использование: make layout-rectify FILE=/path/full-envelope.jpg [OUT=/tmp/rectified.jpg]"; exit 2)
 	@curl --fail-with-body --silent --show-error -X POST \
-		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/rectify" \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/rectify?canonical_orientation=true" \
 		-F "file=@$(abspath $(FILE))" \
 		-o "$${OUT:-/tmp/toolocr-rectified.jpg}"
 	@echo "Сохранено: $${OUT:-/tmp/toolocr-rectified.jpg}"
+
+# Диагностический вариант без автоматического поворота 0/180.
+layout-rectify-raw:
+	@test -n "$(FILE)" || (echo "Использование: make layout-rectify-raw FILE=/path/full-envelope.jpg [OUT=/tmp/rectified-raw.jpg]"; exit 2)
+	@curl --fail-with-body --silent --show-error -X POST \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/rectify?canonical_orientation=false" \
+		-F "file=@$(abspath $(FILE))" \
+		-o "$${OUT:-/tmp/toolocr-rectified-raw.jpg}"
+	@echo "Сохранено: $${OUT:-/tmp/toolocr-rectified-raw.jpg}"
 
 test:
 	python3 tests/test_archive_contract.py "$${ARCHIVE:?Укажите ARCHIVE=/path/ADDRESS_*.zip}"
