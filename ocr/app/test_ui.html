@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ToolOCR — тестирование Stage 2.1</title>
+  <style>
+    :root { color-scheme: light; --bg:#f5f6f8; --card:#fff; --line:#d9dde5; --text:#20242b; --muted:#68707d; --accent:#2f67d8; --danger:#b42318; --ok:#137333; --warn:#9a6700; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
+    main { max-width:1500px; margin:0 auto; padding:24px; }
+    h1 { margin:0 0 4px; font-size:26px; }
+    h2 { margin:0 0 14px; font-size:18px; }
+    .muted { color:var(--muted); }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-top:18px; box-shadow:0 1px 2px rgba(0,0,0,.03); }
+    .drop { border:2px dashed #9eabc2; border-radius:12px; padding:34px; text-align:center; cursor:pointer; background:#fafbfe; transition:.15s; }
+    .drop.drag { border-color:var(--accent); background:#eef4ff; }
+    .drop strong { display:block; font-size:17px; margin-bottom:6px; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+    button { border:1px solid #aeb7c6; background:#fff; color:var(--text); border-radius:8px; padding:8px 12px; cursor:pointer; font-weight:600; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    button.danger { color:var(--danger); border-color:#e7b6b0; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .status { margin-left:auto; color:var(--muted); }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:9px; }
+    table { width:100%; border-collapse:collapse; min-width:950px; }
+    th, td { padding:9px 10px; border-bottom:1px solid #e7eaf0; text-align:left; vertical-align:middle; }
+    th { background:#f7f8fa; font-size:12px; text-transform:uppercase; letter-spacing:.02em; color:#5a6270; position:sticky; top:0; }
+    tbody tr:last-child td { border-bottom:0; }
+    .name { max-width:430px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .pill { display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; background:#eef1f5; }
+    .pill.ok { color:var(--ok); background:#e7f4ea; }
+    .pill.warn { color:var(--warn); background:#fff5d6; }
+    .pill.err { color:var(--danger); background:#fdecea; }
+    .actions { display:flex; gap:6px; white-space:nowrap; }
+    .empty { text-align:center; padding:28px; color:var(--muted); }
+    dialog { border:0; padding:0; border-radius:12px; width:min(1100px,94vw); max-height:92vh; box-shadow:0 20px 70px rgba(0,0,0,.35); }
+    dialog::backdrop { background:rgba(0,0,0,.45); }
+    .modal-head { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); }
+    .modal-head strong { flex:1; }
+    .modal-body { padding:16px; overflow:auto; max-height:80vh; }
+    pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; background:#101317; color:#e6edf3; padding:14px; border-radius:8px; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    #cropImage { display:block; max-width:100%; max-height:75vh; margin:auto; background:#222; }
+    .upload-errors { margin-top:10px; color:var(--danger); white-space:pre-wrap; }
+    @media (max-width:700px) { main { padding:12px; } .card { padding:12px; } .status { width:100%; margin-left:0; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ToolOCR — тестирование Stage 2.1</h1>
+  <div class="muted">Библиотека тестовых изображений хранится в постоянном Docker volume. Normalized crop генерируется только по запросу и на диск не сохраняется.</div>
+
+  <section class="card">
+    <h2>Загрузка изображений</h2>
+    <div id="drop" class="drop" tabindex="0">
+      <strong>Перетащите сюда одно или несколько изображений</strong>
+      или нажмите для выбора файлов
+      <input id="fileInput" type="file" accept="image/*" multiple hidden>
+    </div>
+    <div id="uploadStatus" class="upload-errors"></div>
+  </section>
+
+  <section class="card">
+    <h2>Тестовая библиотека</h2>
+    <div class="toolbar">
+      <button id="selectAll">Выбрать все</button>
+      <button id="selectNone">Снять выбор</button>
+      <button id="run" class="primary">Запустить тест</button>
+      <button id="delete" class="danger">Удалить выбранные</button>
+      <span id="libraryStatus" class="status"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Файл</th><th>Размер</th><th>Разрешение</th><th>Загружен</th></tr></thead>
+        <tbody id="libraryBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Результаты последнего теста</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Файл</th><th>Layout</th><th>Формат / ошибка</th><th>Ориентация</th><th>Normalization</th><th>Время, ms</th><th>Действия</th></tr></thead>
+        <tbody id="resultBody"><tr><td colspan="7" class="empty">Тест ещё не запускался</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<dialog id="debugDialog">
+  <div class="modal-head"><strong id="debugTitle">Debug JSON</strong><button data-close="debugDialog">Закрыть</button></div>
+  <div class="modal-body"><pre id="debugPre"></pre></div>
+</dialog>
+
+<dialog id="cropDialog">
+  <div class="modal-head"><strong id="cropTitle">Normalized crop</strong><button data-close="cropDialog">Закрыть</button></div>
+  <div class="modal-body"><img id="cropImage" alt="Normalized crop"></div>
+</dialog>
+
+<script>
+const state = { images: [], results: new Map() };
+const $ = id => document.getElementById(id);
+const escapeHtml = s => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const fmtBytes = n => n < 1024 ? `${n} B` : n < 1024*1024 ? `${(n/1024).toFixed(1)} KB` : `${(n/1024/1024).toFixed(2)} MB`;
+const fmtDate = s => { try { return new Date(s).toLocaleString('ru-RU'); } catch { return s; } };
+
+async function api(url, options={}) {
+  const response = await fetch(url, options);
+  let payload = null;
+  const type = response.headers.get('content-type') || '';
+  if (type.includes('application/json')) payload = await response.json();
+  if (!response.ok) throw new Error(payload ? JSON.stringify(payload.detail ?? payload) : `${response.status} ${response.statusText}`);
+  return payload;
+}
+
+async function loadImages() {
+  $('libraryStatus').textContent = 'Обновление списка…';
+  try {
+    const data = await api('/v1/test-ui/images');
+    state.images = data.images;
+    renderLibrary();
+    $('libraryStatus').textContent = `Файлов: ${data.count}`;
+  } catch (e) {
+    $('libraryStatus').textContent = `Ошибка: ${e.message}`;
+  }
+}
+
+function renderLibrary() {
+  const body = $('libraryBody');
+  if (!state.images.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">Нет загруженных изображений</td></tr>';
+    return;
+  }
+  body.innerHTML = state.images.map(item => `
+    <tr>
+      <td><input class="pick" type="checkbox" value="${item.id}"></td>
+      <td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td>
+      <td>${fmtBytes(item.bytes)}</td>
+      <td>${item.width_px}×${item.height_px}</td>
+      <td>${fmtDate(item.uploaded_at)}</td>
+    </tr>`).join('');
+}
+
+function selectedIds() { return [...document.querySelectorAll('.pick:checked')].map(x => x.value); }
+
+async function uploadFiles(files) {
+  if (!files.length) return;
+  $('uploadStatus').textContent = `Загрузка: ${files.length} файл(ов)…`;
+  const form = new FormData();
+  [...files].forEach(file => form.append('files', file, file.name));
+  try {
+    const data = await api('/v1/test-ui/images', {method:'POST', body:form});
+    const lines = [];
+    if (data.uploaded.length) lines.push(`Загружено: ${data.uploaded.length}`);
+    data.errors.forEach(e => lines.push(`${e.name}: ${e.error}`));
+    $('uploadStatus').textContent = lines.join('\n');
+    await loadImages();
+  } catch (e) {
+    $('uploadStatus').textContent = `Ошибка загрузки: ${e.message}`;
+  }
+}
+
+function pill(value, kind='') { return `<span class="pill ${kind}">${escapeHtml(value ?? '—')}</span>`; }
+
+function renderResults(items) {
+  const body = $('resultBody');
+  state.results.clear();
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">Нет результатов</td></tr>';
+    return;
+  }
+  items.forEach(item => state.results.set(item.id, item));
+  body.innerHTML = items.map(item => {
+    const layoutKind = item.ok ? (item.layout_status === 'detected' ? 'ok' : 'warn') : 'err';
+    const formatText = item.ok ? `${item.format ?? 'не определён'}${item.format_status ? ` · ${item.format_status}` : ''}` : (typeof item.error === 'string' ? item.error : JSON.stringify(item.error));
+    const orientation = item.orientation_status === 'resolved' ? `${item.orientation_deg}°` : (item.orientation_status ?? '—');
+    return `<tr>
+      <td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td>
+      <td>${pill(item.layout_status, layoutKind)}</td>
+      <td>${item.ok ? escapeHtml(formatText) : `<span class="pill err">${escapeHtml(formatText)}</span>`}</td>
+      <td>${escapeHtml(orientation)}</td>
+      <td>${escapeHtml(item.normalization_status ?? '—')}</td>
+      <td>${item.total_ms ?? '—'}</td>
+      <td><div class="actions">
+        <button onclick="showDebug('${item.id}')">Показать debug</button>
+        <button onclick="showCrop('${item.id}')">Normalized crop</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+async function runSelected() {
+  const ids = selectedIds();
+  if (!ids.length) { alert('Выберите хотя бы одно изображение'); return; }
+  const btn = $('run'); btn.disabled = true; btn.textContent = `Обработка ${ids.length}…`;
+  try {
+    const data = await api('/v1/test-ui/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids})});
+    renderResults(data.results);
+  } catch (e) {
+    alert(`Ошибка запуска теста: ${e.message}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Запустить тест';
+  }
+}
+
+async function deleteSelected() {
+  const ids = selectedIds();
+  if (!ids.length) { alert('Выберите хотя бы одно изображение'); return; }
+  if (!confirm(`Удалить выбранные изображения (${ids.length}) из постоянного volume?`)) return;
+  try {
+    await api('/v1/test-ui/images/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids})});
+    await loadImages();
+  } catch (e) { alert(`Ошибка удаления: ${e.message}`); }
+}
+
+window.showDebug = function(id) {
+  const item = state.results.get(id); if (!item) return;
+  $('debugTitle').textContent = `Debug JSON — ${item.name}`;
+  $('debugPre').textContent = JSON.stringify(item.debug, null, 2);
+  $('debugDialog').showModal();
+}
+
+window.showCrop = function(id) {
+  const item = state.results.get(id); if (!item) return;
+  $('cropTitle').textContent = `Normalized crop — ${item.name}`;
+  $('cropImage').src = `/v1/test-ui/images/${id}/normalized?t=${Date.now()}`;
+  $('cropDialog').showModal();
+}
+
+const drop = $('drop'), input = $('fileInput');
+drop.addEventListener('click', () => input.click());
+drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') input.click(); });
+input.addEventListener('change', () => { uploadFiles(input.files); input.value=''; });
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+drop.addEventListener('drop', e => uploadFiles(e.dataTransfer.files));
+$('selectAll').onclick = () => document.querySelectorAll('.pick').forEach(x => x.checked = true);
+$('selectNone').onclick = () => document.querySelectorAll('.pick').forEach(x => x.checked = false);
+$('run').onclick = runSelected;
+$('delete').onclick = deleteSelected;
+document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => $(btn.dataset.close).close());
+$('cropDialog').addEventListener('close', () => $('cropImage').removeAttribute('src'));
+
+loadImages();
+</script>
+</body>
+</html>
