@@ -72,6 +72,25 @@ def test_scoring_resolves_180_degree_input():
     assert result.profile.profile_id == "vn-c4-i"
 
 
+def test_scoring_resolves_180_even_when_input_touches_bottom_frame():
+    """Regression: frame_contact не должен подавлять реально видимые якоря.
+
+    После физического поворота на 180° нижний край исходного кадра становится
+    верхним краем канонической гипотезы. Старый scoring умножал postage на 0.45
+    только из-за этого факта и мог ошибочно выбрать 0°.
+    """
+    image = cv2.rotate(_synthetic_c4_layout_i(), cv2.ROTATE_180)
+    result = score_gost_profiles(
+        image,
+        DOMESTIC_PROFILES,
+        frame_contact_sides=("bottom",),
+    )
+
+    assert result.orientation.status == "resolved"
+    assert result.orientation.value_deg == 180
+    assert result.orientation.margin > 0.12
+
+
 def test_blank_face_does_not_force_orientation():
     image = np.full((900, 1280, 3), 235, dtype=np.uint8)
     result = score_gost_profiles(image, DOMESTIC_PROFILES)
