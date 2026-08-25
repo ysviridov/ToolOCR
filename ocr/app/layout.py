@@ -105,9 +105,6 @@ def _candidate_score(
     angle_score = _angle_score(quad)
     aspect_score = _aspect_score(quad)
 
-    # Площадь имеет самый большой вес: внешний контур письма должен занимать
-    # существенную часть фотографии. Остальные признаки подавляют внутренние
-    # прямоугольные объекты и случайные контуры фона.
     confidence = (
         0.45 * min(1.0, area_ratio / 0.65)
         + 0.25 * rectangularity
@@ -118,6 +115,78 @@ def _candidate_score(
     return confidence, area_ratio, rectangularity, angle_score
 
 
+def _foreground_mask_otsu(gray_blurred: np.ndarray) -> np.ndarray:
+    """Строит маску светлого отправления на более тёмном фоне сортировщика.
+
+    ГОСТ допускает белую и светлую бумагу, поэтому на фотографиях с тёмной
+    транспортной лентой яркостная сегментация является сильным первым каналом
+    detector-а. Текст, марки и штемпели образуют тёмные области внутри листа,
+    но RETR_EXTERNAL сохраняет внешний контур.
+
+    Canny остаётся вторым независимым каналом для кадров, где яркостное
+    разделение письма и фона недостаточно.
+    """
+
+    _, foreground = cv2.threshold(
+        gray_blurred,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+    foreground = cv2.morphologyEx(
+        foreground,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)),
+        iterations=2,
+    )
+    foreground = cv2.morphologyEx(
+        foreground,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    )
+    return foreground
+
+
+def _edge_mask(gray_blurred: np.ndarray) -> np.ndarray:
+    median = float(np.median(gray_blurred))
+    lower = max(20, int(0.66 * median))
+    upper = min(255, max(lower + 30, int(1.33 * median)))
+
+    edges = cv2.Canny(gray_blurred, lower, upper)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    return cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+
+def _contour_sources(gray_blurred: np.ndarray) -> list[tuple[str, list[np.ndarray]]]:
+    """Возвращает независимые наборы контуров в порядке предпочтения."""
+
+    foreground = _foreground_mask_otsu(gray_blurred)
+    foreground_contours, _ = cv2.findContours(
+        foreground,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+
+    edges = _edge_mask(gray_blurred)
+    edge_contours, _ = cv2.findContours(
+        edges,
+        cv2.RETR_LIST,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+
+    return [
+        (
+            "foreground_otsu",
+            sorted(foreground_contours, key=cv2.contourArea, reverse=True)[:20],
+        ),
+        (
+            "contour_approx",
+            sorted(edge_contours, key=cv2.contourArea, reverse=True)[:80],
+        ),
+    ]
+
+
 def detect_envelope_quad(
     image: np.ndarray,
     *,
@@ -125,6 +194,11 @@ def detect_envelope_quad(
     min_area_ratio: float = 0.15,
 ) -> QuadDetection:
     """Ищет внешний четырёхугольник полного письма.
+
+    Используются два независимых CV-канала:
+    1. foreground_otsu — светлый лист на более тёмном фоне транспортёра;
+    2. contour_approx — границы Canny для кадров со слабым яркостным
+       разделением.
 
     Детектор работает на уменьшенной копии изображения, затем возвращает
     координаты в системе исходной фотографии. В production crop-режим не
@@ -154,89 +228,107 @@ def detect_envelope_quad(
 
     gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    sources = _contour_sources(blurred)
 
-    median = float(np.median(blurred))
-    lower = max(20, int(0.66 * median))
-    upper = min(255, max(lower + 30, int(1.33 * median)))
-    edges = cv2.Canny(blurred, lower, upper)
+    # confidence, quad, method, area_ratio, rectangularity, angle_score
+    best: tuple[float, np.ndarray, str, float, float, float] | None = None
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:80]
-
-    best: tuple[float, np.ndarray, float, float, float] | None = None
-
-    for contour in contours:
-        area = float(cv2.contourArea(contour))
-        if area / frame_area < min_area_ratio:
-            continue
-
-        perimeter = float(cv2.arcLength(contour, True))
-        if perimeter <= 0:
-            continue
-
-        for epsilon_factor in (0.01, 0.015, 0.02, 0.025, 0.03):
-            approx = cv2.approxPolyDP(contour, epsilon_factor * perimeter, True)
-            if len(approx) != 4 or not cv2.isContourConvex(approx):
+    for method, contours in sources:
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area / frame_area < min_area_ratio:
                 continue
 
-            quad = order_quad(approx.reshape(4, 2))
-            confidence, area_ratio, rectangularity, angle_score = _candidate_score(
-                quad=quad,
-                contour_area=area,
-                frame_area=frame_area,
-            )
+            perimeter = float(cv2.arcLength(contour, True))
+            if perimeter <= 0:
+                continue
 
-            if best is None or confidence > best[0]:
-                best = (confidence, quad, area_ratio, rectangularity, angle_score)
+            for epsilon_factor in (0.005, 0.01, 0.015, 0.02, 0.025, 0.03):
+                approx = cv2.approxPolyDP(
+                    contour,
+                    epsilon_factor * perimeter,
+                    True,
+                )
+                if len(approx) != 4 or not cv2.isContourConvex(approx):
+                    continue
+
+                quad = order_quad(approx.reshape(4, 2))
+                confidence, area_ratio, rectangularity, angle_score = _candidate_score(
+                    quad=quad,
+                    contour_area=area,
+                    frame_area=frame_area,
+                )
+
+                if best is None or confidence > best[0]:
+                    best = (
+                        confidence,
+                        quad,
+                        method,
+                        area_ratio,
+                        rectangularity,
+                        angle_score,
+                    )
 
     if best is not None:
-        confidence, quad, area_ratio, rectangularity, angle_score = best
+        confidence, quad, method, area_ratio, rectangularity, angle_score = best
         quad = quad / scale
         return QuadDetection(
             points=order_quad(quad),
-            method="contour_approx",
+            method=method,
             confidence=round(float(confidence), 4),
             area_ratio=round(float(area_ratio), 4),
             rectangularity=round(float(rectangularity), 4),
             angle_score=round(float(angle_score), 4),
         )
 
-    # Fallback нужен для фотографий со слабой внешней границей: берём
-    # минимальный ориентированный прямоугольник большого контура. Confidence
-    # специально ограничен, чтобы такой результат было легко отличить.
-    for contour in contours:
-        area = float(cv2.contourArea(contour))
-        area_ratio = area / frame_area
-        if area_ratio < min_area_ratio:
-            continue
+    # Резервный путь: минимальный ориентированный прямоугольник большого
+    # контура. Проверяем оба канала, но confidence специально ограничен.
+    fallback_best: tuple[float, np.ndarray, str, float, float, float] | None = None
 
-        rect = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(rect).astype(np.float32)
-        box_area = float(rect[1][0] * rect[1][1])
-        if box_area <= 1e-9:
-            continue
+    for source_method, contours in sources:
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            area_ratio = area / frame_area
+            if area_ratio < min_area_ratio:
+                continue
 
-        rectangularity = min(1.0, area / box_area)
-        if rectangularity < 0.72:
-            continue
+            rect = cv2.minAreaRect(contour)
+            box = cv2.boxPoints(rect).astype(np.float32)
+            box_area = float(rect[1][0] * rect[1][1])
+            if box_area <= 1e-9:
+                continue
 
-        quad = order_quad(box)
-        angle_score = _angle_score(quad)
-        confidence = min(
-            0.72,
-            0.35 * min(1.0, area_ratio / 0.65)
-            + 0.30 * rectangularity
-            + 0.20 * angle_score
-            + 0.15 * _aspect_score(quad),
-        )
+            rectangularity = min(1.0, area / box_area)
+            if rectangularity < 0.72:
+                continue
 
+            quad = order_quad(box)
+            angle_score = _angle_score(quad)
+            confidence = min(
+                0.72,
+                0.35 * min(1.0, area_ratio / 0.65)
+                + 0.30 * rectangularity
+                + 0.20 * angle_score
+                + 0.15 * _aspect_score(quad),
+            )
+
+            method = f"{source_method}_min_area_rect"
+            if fallback_best is None or confidence > fallback_best[0]:
+                fallback_best = (
+                    confidence,
+                    quad,
+                    method,
+                    area_ratio,
+                    rectangularity,
+                    angle_score,
+                )
+
+    if fallback_best is not None:
+        confidence, quad, method, area_ratio, rectangularity, angle_score = fallback_best
         quad = quad / scale
         return QuadDetection(
             points=order_quad(quad),
-            method="min_area_rect_fallback",
+            method=method,
             confidence=round(float(confidence), 4),
             area_ratio=round(float(area_ratio), 4),
             rectangularity=round(float(rectangularity), 4),
@@ -284,9 +376,6 @@ def rectify_envelope(image: np.ndarray, quad: np.ndarray) -> RectificationResult
         borderValue=(255, 255, 255),
     )
 
-    # Сортировщик ожидает горизонтальное расположение письма. Если камера или
-    # тестовый снимок дали поворот на 90°, нормализуем только длинную сторону;
-    # различение 0°/180° остаётся отдельным последующим этапом.
     if rectified.shape[0] > rectified.shape[1]:
         rectified = cv2.rotate(rectified, cv2.ROTATE_90_CLOCKWISE)
 
