@@ -6,7 +6,7 @@ TOOLOCR_OCR_PORT ?= 8090
 .PHONY: db-up db-down db-logs db-shell import update datasets activate prune reset \
         migrate-stage11 check-stage11 api-up api-down api-logs api-smoke \
         ocr-up ocr-down ocr-logs ocr-health ocr-smoke \
-        layout-profiles layout-smoke layout-rectify layout-rectify-raw test
+        layout-profiles layout-smoke layout-calibrate layout-rectify layout-rectify-raw test
 
 db-up:
 	$(COMPOSE) up -d db
@@ -93,6 +93,22 @@ layout-smoke:
 	@curl --fail-with-body --silent --show-error -X POST \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/analyze" \
 		-F "file=@$(abspath $(FILE))"
+
+# Однократная калибровка фиксированной камеры по полностью видимому эталону
+# известного ГОСТ-формата. Результат сохраняется атомарно.
+layout-calibrate:
+	@test -n "$(FILE)" || (echo "Использование: make layout-calibrate FILE=/path/reference.jpg FORMAT=C4 [OUT=config/camera-calibration.json]"; exit 2)
+	@test -n "$(FORMAT)" || (echo "Укажите FORMAT=C6|DL|C5|C4|B4"; exit 2)
+	@out="$${OUT:-config/camera-calibration.json}"; \
+	mkdir -p "$$(dirname "$$out")"; \
+	tmp="$$out.tmp"; \
+	curl --fail-with-body --silent --show-error -X POST \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/calibration/estimate?known_format=$(FORMAT)" \
+		-F "file=@$(abspath $(FILE))" \
+		| jq -e '.calibration' > "$$tmp"; \
+	jq -e '.version and .homography_norm_to_mm and .reference_format' "$$tmp" >/dev/null; \
+	mv "$$tmp" "$$out"; \
+	echo "Калибровка сохранена: $$out"
 
 # По умолчанию /rectify применяет автоматически определённый поворот 0/180.
 layout-rectify:
