@@ -217,7 +217,7 @@ function renderStats(items) {
   const errors = total - success;
   const formatResolved = items.filter(item => item.ok && item.format).length;
   const orientationResolved = items.filter(item => item.ok && item.orientation_status === 'resolved').length;
-  const timings = items.map(item => Number(item.total_ms)).filter(Number.isFinite);
+  const timings = items.map(item => item.total_ms).filter(value => typeof value === 'number' && Number.isFinite(value));
   const avg = timings.length ? timings.reduce((sum,value) => sum + value, 0) / timings.length : null;
   const median = percentile(timings, 0.50);
   const p95 = percentile(timings, 0.95);
