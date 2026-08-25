@@ -18,6 +18,11 @@ from .camera_calibration import (
     match_format_by_metric,
     measure_quad_mm_consensus,
 )
+from .frame_normalization import (
+    detection_to_source,
+    normalization_to_dict,
+    normalize_black_background,
+)
 from .gost_r_51506_99 import (
     ENVELOPE_SPECS,
     GOST_ID,
@@ -133,16 +138,21 @@ def _load_calibration_status() -> tuple[tuple[Any, ...], dict[str, Any]]:
             "reason": str(exc),
         }
 
-    first = calibrations[0]
     return calibrations, {
         "status": "loaded",
         "path": CAMERA_CALIBRATION_PATH,
         "count": len(calibrations),
         "reference_formats": [item.reference_format for item in calibrations],
-        "calibration_resolution": {
-            "width_px": first.image_width_px,
-            "height_px": first.image_height_px,
-        },
+        "metric_mode": "quad_pixel_scale",
+        "entries": [
+            {
+                "reference_format": item.reference_format,
+                "image_width_px": item.image_width_px,
+                "image_height_px": item.image_height_px,
+                "image_aspect_ratio": round(item.image_aspect_ratio, 9),
+            }
+            for item in calibrations
+        ],
     }
 
 
@@ -151,6 +161,7 @@ def _consensus_to_dict(consensus: CalibrationConsensus | None) -> dict[str, Any]
         return None
     return {
         "consistent": consensus.consistent,
+        "metric_mode": "quad_pixel_scale",
         "reference_formats": list(consensus.reference_formats),
         "width_spread_mm": consensus.width_spread_mm,
         "height_spread_mm": consensus.height_spread_mm,
@@ -205,6 +216,16 @@ def _metric_decision_to_dict(
     }
 
 
+def _normalize_and_detect(image: np.ndarray, *, min_area_ratio: float) -> tuple[Any, Any]:
+    normalization = normalize_black_background(image)
+    detection_local = detect_envelope_quad(
+        normalization.image,
+        min_area_ratio=min_area_ratio,
+    )
+    detection = detection_to_source(detection_local, normalization)
+    return normalization, detection
+
+
 def _resolve_metric(
     image: np.ndarray,
     detection: Any,
@@ -233,7 +254,7 @@ def _resolve_metric(
             **status,
             "status": "inconsistent",
             "reason": (
-                "Калибровки расходятся более допустимого порога: "
+                "Pixel-scale калибровки расходятся более допустимого порога: "
                 f"width_spread={consensus.width_spread_mm} мм, "
                 f"height_spread={consensus.height_spread_mm} мм"
             ),
@@ -258,14 +279,11 @@ async def estimate_camera_calibration(
     known_format: EnvelopeFormat = Query(..., description="Физический формат эталона по ГОСТ"),
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
 ) -> dict[str, Any]:
-    """Строит одну калибровочную запись для известного формата.
-
-    Сохранение/merge в общий camera-calibration.json выполняет make layout-calibrate.
-    """
+    """Строит запись калибровки по эталону, предварительно убрав черный фон."""
 
     raw, image = await _read_and_decode(file)
     try:
-        detection = detect_envelope_quad(image, min_area_ratio=min_area_ratio)
+        normalization, detection = _normalize_and_detect(image, min_area_ratio=min_area_ratio)
     except EnvelopeNotFoundError as exc:
         raise HTTPException(
             status_code=422,
@@ -307,6 +325,7 @@ async def estimate_camera_calibration(
             "width_px": int(image.shape[1]),
             "height_px": int(image.shape[0]),
         },
+        "frame_normalization": normalization_to_dict(normalization),
         "known_format": known_format.value,
         "detector": {
             "method": detection.method,
@@ -330,9 +349,17 @@ async def analyze_layout(
     raw, image = await _read_and_decode(file)
     decode_ms = (time.perf_counter() - decode_started) * 1000.0
 
+    normalization_started = time.perf_counter()
+    normalization = normalize_black_background(image)
+    normalization_ms = (time.perf_counter() - normalization_started) * 1000.0
+
     detect_started = time.perf_counter()
     try:
-        detection = detect_envelope_quad(image, min_area_ratio=min_area_ratio)
+        detection_local = detect_envelope_quad(
+            normalization.image,
+            min_area_ratio=min_area_ratio,
+        )
+        detection = detection_to_source(detection_local, normalization)
     except EnvelopeNotFoundError as exc:
         raise HTTPException(
             status_code=422,
@@ -414,6 +441,7 @@ async def analyze_layout(
         if scoring.orientation.status == "resolved" and scoring.orientation.value_deg == 180:
             canonical = cv2.rotate(canonical, cv2.ROTATE_180)
         debug_images = {
+            "normalized_jpeg_base64": _encode_debug_jpeg(normalization.image),
             "overlay_jpeg_base64": _encode_debug_jpeg(overlay),
             "rectified_jpeg_base64": _encode_debug_jpeg(rectified.image),
             "canonical_jpeg_base64": _encode_debug_jpeg(canonical),
@@ -448,6 +476,7 @@ async def analyze_layout(
             "width_px": int(image.shape[1]),
             "height_px": int(image.shape[0]),
         },
+        "frame_normalization": normalization_to_dict(normalization),
         "detector": {
             "method": detection.method,
             "confidence": detection.confidence,
@@ -455,6 +484,7 @@ async def analyze_layout(
             "frame_status": detection.frame_status,
             "frame_contact_sides": list(detection.frame_contact_sides),
             "area_ratio": detection.area_ratio,
+            "area_ratio_scope": "normalized_crop",
             "rectangularity": detection.rectangularity,
             "angle_score": detection.angle_score,
             "quad_order": ["TL", "TR", "BR", "BL"],
@@ -500,6 +530,7 @@ async def analyze_layout(
         },
         "timing": {
             "decode_ms": _round_ms(decode_ms),
+            "normalization_ms": _round_ms(normalization_ms),
             "detect_ms": _round_ms(detect_ms),
             "metric_ms": _round_ms(metric_ms),
             "rectify_ms": _round_ms(rectify_ms),
@@ -523,7 +554,7 @@ async def rectify_image(
 ) -> Response:
     _, image = await _read_and_decode(file)
     try:
-        detection = detect_envelope_quad(image, min_area_ratio=min_area_ratio)
+        normalization, detection = _normalize_and_detect(image, min_area_ratio=min_area_ratio)
     except EnvelopeNotFoundError as exc:
         raise HTTPException(
             status_code=422,
@@ -561,6 +592,7 @@ async def rectify_image(
         media_type="image/jpeg",
         headers={
             "X-ToolOCR-Stage": "2.1",
+            "X-ToolOCR-Frame-Normalization": normalization.status,
             "X-ToolOCR-Detector": detection.method,
             "X-ToolOCR-Quad-Confidence": f"{detection.confidence:.4f}",
             "X-ToolOCR-Frame-Status": detection.frame_status,
