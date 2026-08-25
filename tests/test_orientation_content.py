@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 
 from ocr.app.gost_r_51506_99 import EnvelopeFormat
 from ocr.app.profile_scoring import (
