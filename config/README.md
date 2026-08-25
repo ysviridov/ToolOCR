@@ -2,13 +2,42 @@
 
 Каталог предназначен для локальной метрической калибровки фиксированной камеры сортировщика.
 
-Файл `camera-calibration.json` создаётся командой:
+Файл `camera-calibration.json` хранит **набор калибровок по эталонным форматам** C6, DL, C5, C4 и B4. Повторная калибровка одного формата не должна удалять остальные.
+
+Добавить/обновить C5:
 
 ```bash
-make layout-calibrate FILE=/path/reference.jpg FORMAT=C4
+make layout-calibrate FILE=/path/reference-c5.jpg FORMAT=C5
 ```
 
-Требования к калибровочному кадру:
+Добавить/обновить DL:
+
+```bash
+make layout-calibrate FILE=/path/reference-dl.jpg FORMAT=DL
+```
+
+Просмотреть сохранённые форматы:
+
+```bash
+make layout-calibrations
+```
+
+Формат файла версии 2:
+
+```json
+{
+  "version": 2,
+  "standard": "ГОСТ Р 51506-99",
+  "calibrations": {
+    "C5": {"version": 1, "reference_format": "C5", "homography_norm_to_mm": []},
+    "DL": {"version": 1, "reference_format": "DL", "homography_norm_to_mm": []}
+  }
+}
+```
+
+Старый одноформатный JSON версии 1 читается сервисом и автоматически мигрирует в контейнер версии 2 при следующем `make layout-calibrate`.
+
+Требования к каждому калибровочному кадру:
 
 - камера находится в том же положении и с тем же FOV, что и в production;
 - эталон лежит в рабочей плоскости транспортёра;
@@ -19,7 +48,7 @@ make layout-calibrate FILE=/path/reference.jpg FORMAT=C4
 
 `camera-calibration.json` не добавляется в Git: это характеристика конкретной камеры/сортировщика.
 
-В Docker каталог `./config` монтируется read-only в `/app/config`, а OCR/layout-сервис читает калибровку из:
+В Docker каталог `./config` монтируется read-only в `/app/config`, а OCR/layout-сервис читает набор из:
 
 ```text
 /app/config/camera-calibration.json
@@ -27,4 +56,6 @@ make layout-calibrate FILE=/path/reference.jpg FORMAT=C4
 
 Путь можно переопределить переменной окружения `LAYOUT_CAMERA_CALIBRATION`.
 
-Калибровка хранит homography из нормализованных координат изображения в миллиметры плоскости транспортёра. Поэтому изменение разрешения допустимо только при неизменном FOV и отношении сторон. Изменение положения камеры, объектива, zoom/crop или геометрии транспортёра требует повторной калибровки.
+При обработке production-письма ToolOCR применяет все сохранённые homography к одному найденному внешнему четырёхугольнику, строит медианный метрический consensus и контролирует разброс между эталонами. Поэтому неизвестный формат письма не используется для выбора калибровки заранее.
+
+Изменение положения камеры, объектива, zoom/crop или геометрии транспортёра требует повторной калибровки всех используемых эталонных форматов.
