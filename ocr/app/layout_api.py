@@ -9,22 +9,12 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 
-from .gost_r_51506_99 import (
-    ENVELOPE_SPECS,
-    GOST_ID,
-    candidate_formats_by_aspect_ratio,
-)
-from .layout import (
-    EnvelopeNotFoundError,
-    detect_envelope_quad,
-    draw_detection_overlay,
-    rectify_envelope,
-)
+from .gost_r_51506_99 import ENVELOPE_SPECS, GOST_ID, candidate_formats_by_aspect_ratio
+from .layout import EnvelopeNotFoundError, detect_envelope_quad, draw_detection_overlay, rectify_envelope
 from .profiles import DOMESTIC_PROFILES, profiles_for_format
 
 
 router = APIRouter(prefix="/v1/layout", tags=["layout"])
-
 MAX_UPLOAD_MB = int(os.environ.get("OCR_MAX_UPLOAD_MB", "20"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 MAX_PIXELS = int(os.environ.get("OCR_MAX_PIXELS", "40000000"))
@@ -40,22 +30,13 @@ async def _read_and_decode(file: UploadFile) -> tuple[bytes, np.ndarray]:
         raise HTTPException(status_code=413, detail=f"Максимальный размер файла: {MAX_UPLOAD_MB} МБ")
     if not raw:
         raise HTTPException(status_code=400, detail="Передан пустой файл")
-
     encoded = np.frombuffer(raw, dtype=np.uint8)
     image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
     if image is None:
-        raise HTTPException(
-            status_code=415,
-            detail="Не удалось декодировать изображение. Поддерживаются JPEG/PNG/BMP/TIFF.",
-        )
-
+        raise HTTPException(status_code=415, detail="Не удалось декодировать изображение")
     height, width = image.shape[:2]
     if height * width > MAX_PIXELS:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Изображение слишком большое: {width}x{height}; максимум {MAX_PIXELS} пикселей",
-        )
-
+        raise HTTPException(status_code=413, detail=f"Изображение слишком большое: {width}x{height}")
     return raw, image
 
 
@@ -68,7 +49,6 @@ def _encode_debug_jpeg(image: np.ndarray, *, max_side: int = 2200) -> str:
             (max(1, round(width * scale)), max(1, round(height * scale))),
             interpolation=cv2.INTER_AREA,
         )
-
     ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
     if not ok:
         raise HTTPException(status_code=500, detail="Не удалось закодировать debug JPEG")
@@ -92,8 +72,6 @@ def _profile_to_dict(profile: Any, ratio_error: float | None = None) -> dict[str
 
 @router.get("/profiles")
 def list_profiles() -> dict[str, Any]:
-    """Возвращает поддерживаемый каталог внутренних профилей ГОСТ."""
-
     return {
         "standard": GOST_ID,
         "scope": "domestic",
@@ -108,14 +86,7 @@ async def analyze_layout(
     include_debug_images: bool = Query(default=False),
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
 ) -> dict[str, Any]:
-    """Находит полный конверт, исправляет перспективу и подбирает ГОСТ-профили.
-
-    В Stage 2.1 ориентации 0° и 180° намеренно возвращаются как две гипотезы.
-    Выбор одной из них будет выполняться profile scoring по ГОСТ-якорям.
-    """
-
     total_started = time.perf_counter()
-
     decode_started = time.perf_counter()
     raw, image = await _read_and_decode(file)
     decode_ms = (time.perf_counter() - decode_started) * 1000.0
@@ -144,7 +115,6 @@ async def analyze_layout(
         rectified.height_px,
         max_relative_error=0.08,
     )
-
     profile_candidates: list[dict[str, Any]] = []
     for candidate in format_candidates:
         for profile in profiles_for_format(candidate.format):
@@ -170,7 +140,6 @@ async def analyze_layout(
         {"x": round(float(point[0]), 2), "y": round(float(point[1]), 2)}
         for point in detection.points
     ]
-
     candidates_json = []
     for candidate in format_candidates:
         spec = ENVELOPE_SPECS[candidate.format]
@@ -185,11 +154,10 @@ async def analyze_layout(
         )
 
     total_ms = (time.perf_counter() - total_started) * 1000.0
-
     return {
         "stage": "2.1",
         "standard": GOST_ID,
-        "layout_status": "detected",
+        "layout_status": "detected" if not detection.frame_contact_sides else "partial_frame",
         "input": {
             "filename": file.filename,
             "content_type": file.content_type,
@@ -200,6 +168,9 @@ async def analyze_layout(
         "detector": {
             "method": detection.method,
             "confidence": detection.confidence,
+            "raw_confidence": detection.raw_confidence,
+            "frame_status": detection.frame_status,
+            "frame_contact_sides": list(detection.frame_contact_sides),
             "area_ratio": detection.area_ratio,
             "rectangularity": detection.rectangularity,
             "angle_score": detection.angle_score,
@@ -235,8 +206,6 @@ async def rectify_image(
     file: UploadFile = File(..., description="Полная фотография лицевой стороны письма"),
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
 ) -> Response:
-    """Возвращает JPEG после поиска внешнего контура и perspective rectification."""
-
     _, image = await _read_and_decode(file)
     try:
         detection = detect_envelope_quad(image, min_area_ratio=min_area_ratio)
@@ -249,12 +218,10 @@ async def rectify_image(
                 "message": str(exc),
             },
         ) from exc
-
     rectified = rectify_envelope(image, detection.points)
     ok, encoded = cv2.imencode(".jpg", rectified.image, [cv2.IMWRITE_JPEG_QUALITY, 94])
     if not ok:
         raise HTTPException(status_code=500, detail="Не удалось закодировать rectified JPEG")
-
     return Response(
         content=encoded.tobytes(),
         media_type="image/jpeg",
@@ -262,6 +229,8 @@ async def rectify_image(
             "X-ToolOCR-Stage": "2.1",
             "X-ToolOCR-Detector": detection.method,
             "X-ToolOCR-Quad-Confidence": f"{detection.confidence:.4f}",
+            "X-ToolOCR-Frame-Status": detection.frame_status,
+            "X-ToolOCR-Frame-Contact-Sides": ",".join(detection.frame_contact_sides),
             "X-ToolOCR-Orientation": "pending-0-or-180",
         },
     )
