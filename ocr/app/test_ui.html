@@ -34,12 +34,29 @@
     .pill.err { color:var(--danger); background:#fdecea; }
     .actions { display:flex; gap:6px; white-space:nowrap; }
     .empty { text-align:center; padding:28px; color:var(--muted); }
+    .stats { margin:0 0 16px; }
+    .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:9px; margin-bottom:10px; }
+    .stat { border:1px solid var(--line); border-radius:9px; padding:10px 12px; background:#fafbfc; min-width:0; }
+    .stat-label { color:var(--muted); font-size:12px; margin-bottom:2px; }
+    .stat-value { font-size:20px; line-height:1.2; font-weight:750; font-variant-numeric:tabular-nums; }
+    .stat-value.ok { color:var(--ok); }
+    .stat-value.err { color:var(--danger); }
+    .stats-details { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:9px; }
+    .stats-group { border:1px solid var(--line); border-radius:9px; padding:9px 11px; background:#fff; }
+    .stats-group strong { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+    .stats-chips { display:flex; flex-wrap:wrap; gap:5px; }
+    .stats-chip { border-radius:999px; padding:3px 8px; background:#eef1f5; font-size:12px; white-space:nowrap; }
     dialog { border:0; padding:0; border-radius:12px; width:min(1100px,94vw); max-height:92vh; box-shadow:0 20px 70px rgba(0,0,0,.35); }
     dialog::backdrop { background:rgba(0,0,0,.45); }
     .modal-head { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); }
     .modal-head strong { flex:1; }
     .modal-body { padding:16px; overflow:auto; max-height:80vh; }
-    pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; background:#101317; color:#e6edf3; padding:14px; border-radius:8px; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    pre { margin:0; white-space:pre; overflow:auto; background:#101317; color:#e6edf3; padding:14px; border-radius:8px; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; tab-size:2; }
+    .json-key { color:#7ee787; }
+    .json-string { color:#a5d6ff; }
+    .json-number { color:#79c0ff; }
+    .json-boolean { color:#ff7b72; }
+    .json-null { color:#d2a8ff; }
     #cropImage { display:block; max-width:100%; max-height:75vh; margin:auto; background:#222; }
     .upload-errors { margin-top:10px; color:var(--danger); white-space:pre-wrap; }
     @media (max-width:700px) { main { padding:12px; } .card { padding:12px; } .status { width:100%; margin-left:0; } }
@@ -79,6 +96,7 @@
 
   <section class="card">
     <h2>Результаты последнего теста</h2>
+    <div id="resultStats" class="stats" hidden></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Файл</th><th>Layout</th><th>Формат / ошибка</th><th>Ориентация</th><th>Normalization</th><th>Время, ms</th><th>Действия</th></tr></thead>
@@ -163,9 +181,80 @@ async function uploadFiles(files) {
 
 function pill(value, kind='') { return `<span class="pill ${kind}">${escapeHtml(value ?? '—')}</span>`; }
 
+function countBy(items, selector) {
+  const counts = new Map();
+  items.forEach(item => {
+    const key = String(selector(item) ?? '—');
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return [...counts.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ru'));
+}
+
+function percentile(values, fraction) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a,b) => a-b);
+  const index = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
+  return sorted[index];
+}
+
+function statCard(label, value, kind='') {
+  return `<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value ${kind}">${escapeHtml(value)}</div></div>`;
+}
+
+function statGroup(label, entries) {
+  const chips = entries.length
+    ? entries.map(([key,count]) => `<span class="stats-chip">${escapeHtml(key)}: <strong>${count}</strong></span>`).join('')
+    : '<span class="muted">—</span>';
+  return `<div class="stats-group"><strong>${escapeHtml(label)}</strong><div class="stats-chips">${chips}</div></div>`;
+}
+
+function renderStats(items) {
+  const root = $('resultStats');
+  if (!items.length) { root.hidden = true; root.innerHTML = ''; return; }
+
+  const total = items.length;
+  const success = items.filter(item => item.ok).length;
+  const errors = total - success;
+  const formatResolved = items.filter(item => item.ok && item.format).length;
+  const orientationResolved = items.filter(item => item.ok && item.orientation_status === 'resolved').length;
+  const timings = items.map(item => Number(item.total_ms)).filter(Number.isFinite);
+  const avg = timings.length ? timings.reduce((sum,value) => sum + value, 0) / timings.length : null;
+  const median = percentile(timings, 0.50);
+  const p95 = percentile(timings, 0.95);
+
+  const formatCounts = countBy(items, item => !item.ok ? 'ошибка' : (item.format || 'не определён'));
+  const orientationCounts = countBy(items, item => {
+    if (!item.ok) return 'ошибка';
+    if (item.orientation_status === 'resolved') return `${item.orientation_deg}°`;
+    return item.orientation_status || 'не определена';
+  });
+  const layoutCounts = countBy(items, item => item.layout_status || '—');
+  const normalizationCounts = countBy(items, item => item.normalization_status || (item.ok ? '—' : 'ошибка'));
+
+  root.innerHTML = `
+    <div class="stats-grid">
+      ${statCard('Всего', total)}
+      ${statCard('Успешно', success, 'ok')}
+      ${statCard('Ошибки', errors, errors ? 'err' : '')}
+      ${statCard('Формат определён', `${formatResolved}/${total}`)}
+      ${statCard('Ориентация определена', `${orientationResolved}/${total}`)}
+      ${statCard('Среднее, ms', avg === null ? '—' : avg.toFixed(1))}
+      ${statCard('Median, ms', median === null ? '—' : median.toFixed(1))}
+      ${statCard('P95, ms', p95 === null ? '—' : p95.toFixed(1))}
+    </div>
+    <div class="stats-details">
+      ${statGroup('Форматы', formatCounts)}
+      ${statGroup('Ориентация', orientationCounts)}
+      ${statGroup('Layout', layoutCounts)}
+      ${statGroup('Normalization', normalizationCounts)}
+    </div>`;
+  root.hidden = false;
+}
+
 function renderResults(items) {
   const body = $('resultBody');
   state.results.clear();
+  renderStats(items);
   if (!items.length) {
     body.innerHTML = '<tr><td colspan="7" class="empty">Нет результатов</td></tr>';
     return;
@@ -189,6 +278,25 @@ function renderResults(items) {
       </div></td>
     </tr>`;
   }).join('');
+}
+
+function highlightedJson(value, depth=0) {
+  const pad = '  '.repeat(depth);
+  const childPad = '  '.repeat(depth + 1);
+  if (value === null) return '<span class="json-null">null</span>';
+  if (typeof value === 'string') return `<span class="json-string">${escapeHtml(JSON.stringify(value))}</span>`;
+  if (typeof value === 'number') return `<span class="json-number">${escapeHtml(String(value))}</span>`;
+  if (typeof value === 'boolean') return `<span class="json-boolean">${value}</span>`;
+  if (Array.isArray(value)) {
+    if (!value.length) return '[]';
+    return `[\n${value.map(item => `${childPad}${highlightedJson(item, depth + 1)}`).join(',\n')}\n${pad}]`;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (!entries.length) return '{}';
+    return `{\n${entries.map(([key,item]) => `${childPad}<span class="json-key">${escapeHtml(JSON.stringify(key))}</span>: ${highlightedJson(item, depth + 1)}`).join(',\n')}\n${pad}}`;
+  }
+  return `<span class="json-null">${escapeHtml(String(value))}</span>`;
 }
 
 async function runSelected() {
@@ -218,7 +326,7 @@ async function deleteSelected() {
 window.showDebug = function(id) {
   const item = state.results.get(id); if (!item) return;
   $('debugTitle').textContent = `Debug JSON — ${item.name}`;
-  $('debugPre').textContent = JSON.stringify(item.debug, null, 2);
+  $('debugPre').innerHTML = highlightedJson(item.debug);
   $('debugDialog').showModal();
 }
 
