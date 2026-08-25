@@ -18,6 +18,7 @@ CALIBRATION_ENTRY_VERSION = 1
 CALIBRATION_SET_VERSION = 2
 DEFAULT_SIZE_TOLERANCE_MM = 8.0
 DEFAULT_CONSENSUS_SPREAD_MM = 12.0
+DEFAULT_FRAME_ASPECT_TOLERANCE = 0.002
 
 
 class CameraCalibrationError(RuntimeError):
@@ -252,6 +253,13 @@ def _parse_calibration_set(payload: dict) -> tuple[PlaneCalibration, ...]:
 
 
 def load_plane_calibrations(path: str | Path) -> tuple[PlaneCalibration, ...]:
+    """Загружает весь набор калибровок.
+
+    Разные записи могут относиться к разным FOV/crop. Это нормально для
+    сортировщика: совместимая группа выбирается уже для конкретного входного
+    кадра в `measure_quad_mm_consensus()`.
+    """
+
     calibration_path = Path(path)
     try:
         payload = json.loads(calibration_path.read_text(encoding="utf-8"))
@@ -260,17 +268,12 @@ def load_plane_calibrations(path: str | Path) -> tuple[PlaneCalibration, ...]:
     except json.JSONDecodeError as exc:
         raise CameraCalibrationError(f"Некорректный JSON калибровки: {exc}") from exc
 
-    calibrations = _parse_calibration_set(payload)
-    aspects = [item.image_aspect_ratio for item in calibrations]
-    if max(aspects) - min(aspects) > 0.002 * max(1.0, median(aspects)):
-        raise CameraCalibrationError(
-            "Калибровки имеют несовместимые FOV/отношения сторон изображения"
-        )
-    return calibrations
+    return _parse_calibration_set(payload)
 
 
 def load_plane_calibration(path: str | Path) -> PlaneCalibration:
     """Совместимость со старым API: допускается только один эталон."""
+
     calibrations = load_plane_calibrations(path)
     if len(calibrations) != 1:
         raise CameraCalibrationError(
@@ -279,15 +282,55 @@ def load_plane_calibration(path: str | Path) -> PlaneCalibration:
     return calibrations[0]
 
 
+def _frame_aspect_error(
+    calibration: PlaneCalibration,
+    *,
+    image_width_px: int,
+    image_height_px: int,
+) -> float:
+    if image_width_px <= 0 or image_height_px <= 0:
+        raise CameraCalibrationError("Некорректный размер входного кадра")
+    observed = float(image_width_px) / float(image_height_px)
+    return abs(observed - calibration.image_aspect_ratio) / calibration.image_aspect_ratio
+
+
+def select_calibrations_for_frame(
+    calibrations: Sequence[PlaneCalibration],
+    *,
+    image_width_px: int,
+    image_height_px: int,
+    aspect_tolerance: float = DEFAULT_FRAME_ASPECT_TOLERANCE,
+) -> tuple[PlaneCalibration, ...]:
+    """Выбирает калибровки, совместимые с FOV/crop текущего изображения."""
+
+    if aspect_tolerance <= 0:
+        raise ValueError("aspect_tolerance должен быть > 0")
+    items = tuple(calibrations)
+    compatible = tuple(
+        item
+        for item in items
+        if _frame_aspect_error(
+            item,
+            image_width_px=image_width_px,
+            image_height_px=image_height_px,
+        ) <= aspect_tolerance
+    )
+    return compatible
+
+
 def _validate_frame_geometry(
     calibration: PlaneCalibration,
     *,
     image_width_px: int,
     image_height_px: int,
-    aspect_tolerance: float = 0.002,
+    aspect_tolerance: float = DEFAULT_FRAME_ASPECT_TOLERANCE,
 ) -> None:
     observed = float(image_width_px) / float(image_height_px)
-    relative_error = abs(observed - calibration.image_aspect_ratio) / calibration.image_aspect_ratio
+    relative_error = _frame_aspect_error(
+        calibration,
+        image_width_px=image_width_px,
+        image_height_px=image_height_px,
+    )
     if relative_error > aspect_tolerance:
         raise CameraCalibrationError(
             "FOV/отношение сторон кадра отличается от калибровочного: "
@@ -361,12 +404,30 @@ def measure_quad_mm_consensus(
     image_height_px: int,
     frame_contact_sides: Sequence[str] = (),
     max_spread_mm: float = DEFAULT_CONSENSUS_SPREAD_MM,
+    aspect_tolerance: float = DEFAULT_FRAME_ASPECT_TOLERANCE,
 ) -> CalibrationConsensus:
-    items = tuple(calibrations)
-    if not items:
+    all_items = tuple(calibrations)
+    if not all_items:
         raise CameraCalibrationError("Нет доступных калибровок")
     if max_spread_mm <= 0:
         raise ValueError("max_spread_mm должен быть > 0")
+
+    items = select_calibrations_for_frame(
+        all_items,
+        image_width_px=image_width_px,
+        image_height_px=image_height_px,
+        aspect_tolerance=aspect_tolerance,
+    )
+    if not items:
+        observed = float(image_width_px) / float(image_height_px)
+        available = ", ".join(
+            f"{item.reference_format}:{item.image_aspect_ratio:.6f}"
+            for item in all_items
+        )
+        raise CameraCalibrationError(
+            "Нет калибровки для FOV/отношения сторон текущего кадра: "
+            f"current={observed:.6f}; available=[{available}]"
+        )
 
     per_reference = tuple(
         CalibrationMeasurement(
