@@ -68,8 +68,11 @@ services:
       OCR_DEFAULT_LANG: ${OCR_DEFAULT_LANG:-rus+eng}
       OCR_DEFAULT_PSM: ${OCR_DEFAULT_PSM:-11}
       LAYOUT_CAMERA_CALIBRATION: ${LAYOUT_CAMERA_CALIBRATION:-/app/config/camera-calibration.json}
+      TEST_UI_STORAGE_DIR: ${TEST_UI_STORAGE_DIR:-/app/test-data}
+      TEST_UI_MAX_FILES_PER_RUN: ${TEST_UI_MAX_FILES_PER_RUN:-100}
     volumes:
       - ./config:/app/config:ro
+      - toolocr_testdata:/app/test-data
     ports:
       - "${TOOLOCR_OCR_PORT:-8090}:8090"
     healthcheck:
@@ -81,3 +84,4 @@ services:
 
 volumes:
   toolocr_pgdata:
+  toolocr_testdata:
