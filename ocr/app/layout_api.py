@@ -11,11 +11,12 @@ from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 
 from .camera_calibration import (
     CameraCalibrationError,
+    CalibrationConsensus,
     build_plane_calibration,
     calibration_to_dict,
-    load_plane_calibration,
+    load_plane_calibrations,
     match_format_by_metric,
-    measure_quad_mm,
+    measure_quad_mm_consensus,
 )
 from .gost_r_51506_99 import (
     ENVELOPE_SPECS,
@@ -107,31 +108,68 @@ def _hypothesis_to_dict(hypothesis: ProfileHypothesis) -> dict[str, Any]:
     }
 
 
-def _load_calibration_status() -> tuple[Any | None, dict[str, Any]]:
+def _measurement_to_dict(measurement: Any) -> dict[str, Any]:
+    return {
+        "width_mm": measurement.width_mm,
+        "height_mm": measurement.height_mm,
+        "top_width_mm": measurement.top_width_mm,
+        "bottom_width_mm": measurement.bottom_width_mm,
+        "left_height_mm": measurement.left_height_mm,
+        "right_height_mm": measurement.right_height_mm,
+        "width_exact": measurement.width_exact,
+        "height_exact": measurement.height_exact,
+    }
+
+
+def _load_calibration_status() -> tuple[tuple[Any, ...], dict[str, Any]]:
     if not CAMERA_CALIBRATION_PATH:
-        return None, {"status": "disabled", "path": None}
+        return (), {"status": "disabled", "path": None}
     try:
-        calibration = load_plane_calibration(CAMERA_CALIBRATION_PATH)
+        calibrations = load_plane_calibrations(CAMERA_CALIBRATION_PATH)
     except CameraCalibrationError as exc:
-        return None, {
+        return (), {
             "status": "unavailable",
             "path": CAMERA_CALIBRATION_PATH,
             "reason": str(exc),
         }
-    return calibration, {
+
+    first = calibrations[0]
+    return calibrations, {
         "status": "loaded",
         "path": CAMERA_CALIBRATION_PATH,
-        "reference_format": calibration.reference_format,
-        "reference_width_mm": calibration.reference_width_mm,
-        "reference_height_mm": calibration.reference_height_mm,
+        "count": len(calibrations),
+        "reference_formats": [item.reference_format for item in calibrations],
         "calibration_resolution": {
-            "width_px": calibration.image_width_px,
-            "height_px": calibration.image_height_px,
+            "width_px": first.image_width_px,
+            "height_px": first.image_height_px,
         },
     }
 
 
-def _metric_decision_to_dict(decision: Any | None, calibration_status: dict[str, Any]) -> dict[str, Any]:
+def _consensus_to_dict(consensus: CalibrationConsensus | None) -> dict[str, Any] | None:
+    if consensus is None:
+        return None
+    return {
+        "consistent": consensus.consistent,
+        "reference_formats": list(consensus.reference_formats),
+        "width_spread_mm": consensus.width_spread_mm,
+        "height_spread_mm": consensus.height_spread_mm,
+        "measurement": _measurement_to_dict(consensus.measurement),
+        "per_reference": [
+            {
+                "reference_format": item.reference_format,
+                "measurement": _measurement_to_dict(item.measurement),
+            }
+            for item in consensus.per_reference
+        ],
+    }
+
+
+def _metric_decision_to_dict(
+    decision: Any | None,
+    calibration_status: dict[str, Any],
+    consensus: CalibrationConsensus | None,
+) -> dict[str, Any]:
     if decision is None:
         return {
             "status": "unavailable",
@@ -139,7 +177,8 @@ def _metric_decision_to_dict(decision: Any | None, calibration_status: dict[str,
             "confidence": 0.0,
             "margin": 0.0,
             "calibration": calibration_status,
-            "measurement": None,
+            "consensus": _consensus_to_dict(consensus),
+            "measurement": _measurement_to_dict(consensus.measurement) if consensus is not None else None,
             "candidates": [],
         }
 
@@ -150,16 +189,8 @@ def _metric_decision_to_dict(decision: Any | None, calibration_status: dict[str,
         "confidence": decision.confidence,
         "margin": decision.margin,
         "calibration": calibration_status,
-        "measurement": {
-            "width_mm": measurement.width_mm,
-            "height_mm": measurement.height_mm,
-            "top_width_mm": measurement.top_width_mm,
-            "bottom_width_mm": measurement.bottom_width_mm,
-            "left_height_mm": measurement.left_height_mm,
-            "right_height_mm": measurement.right_height_mm,
-            "width_exact": measurement.width_exact,
-            "height_exact": measurement.height_exact,
-        },
+        "consensus": _consensus_to_dict(consensus),
+        "measurement": _measurement_to_dict(measurement),
         "candidates": [
             {
                 "format": candidate.format.value,
@@ -172,6 +203,43 @@ def _metric_decision_to_dict(decision: Any | None, calibration_status: dict[str,
             for candidate in decision.candidates
         ],
     }
+
+
+def _resolve_metric(
+    image: np.ndarray,
+    detection: Any,
+) -> tuple[Any | None, CalibrationConsensus | None, dict[str, Any]]:
+    calibrations, status = _load_calibration_status()
+    if not calibrations:
+        return None, None, status
+
+    try:
+        consensus = measure_quad_mm_consensus(
+            calibrations,
+            detection.points,
+            image_width_px=int(image.shape[1]),
+            image_height_px=int(image.shape[0]),
+            frame_contact_sides=detection.frame_contact_sides,
+        )
+    except CameraCalibrationError as exc:
+        return None, None, {
+            **status,
+            "status": "invalid_for_frame",
+            "reason": str(exc),
+        }
+
+    if not consensus.consistent:
+        return None, consensus, {
+            **status,
+            "status": "inconsistent",
+            "reason": (
+                "Калибровки расходятся более допустимого порога: "
+                f"width_spread={consensus.width_spread_mm} мм, "
+                f"height_spread={consensus.height_spread_mm} мм"
+            ),
+        }
+
+    return match_format_by_metric(consensus.measurement), consensus, status
 
 
 @router.get("/profiles")
@@ -190,10 +258,9 @@ async def estimate_camera_calibration(
     known_format: EnvelopeFormat = Query(..., description="Физический формат эталона по ГОСТ"),
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
 ) -> dict[str, Any]:
-    """Строит homography плоскости транспортёра по конверту известного формата.
+    """Строит одну калибровочную запись для известного формата.
 
-    Endpoint ничего не сохраняет на сервере. Возвращённый объект `calibration`
-    следует сохранить в `config/camera-calibration.json` через make-команду.
+    Сохранение/merge в общий camera-calibration.json выполняет make layout-calibrate.
     """
 
     raw, image = await _read_and_decode(file)
@@ -274,24 +341,7 @@ async def analyze_layout(
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
 
     metric_started = time.perf_counter()
-    calibration, calibration_status = _load_calibration_status()
-    metric_decision = None
-    if calibration is not None:
-        try:
-            metric_measurement = measure_quad_mm(
-                calibration,
-                detection.points,
-                image_width_px=int(image.shape[1]),
-                image_height_px=int(image.shape[0]),
-                frame_contact_sides=detection.frame_contact_sides,
-            )
-            metric_decision = match_format_by_metric(metric_measurement)
-        except CameraCalibrationError as exc:
-            calibration_status = {
-                **calibration_status,
-                "status": "invalid_for_frame",
-                "reason": str(exc),
-            }
+    metric_decision, metric_consensus, calibration_status = _resolve_metric(image, detection)
     metric_ms = (time.perf_counter() - metric_started) * 1000.0
 
     rectify_started = time.perf_counter()
@@ -315,11 +365,7 @@ async def analyze_layout(
         if metric_decision is not None and metric_decision.status == "resolved"
         else None
     )
-    scoring_profiles = (
-        profiles_for_format(metric_format)
-        if metric_format is not None
-        else DOMESTIC_PROFILES
-    )
+    scoring_profiles = profiles_for_format(metric_format) if metric_format is not None else DOMESTIC_PROFILES
 
     scoring_started = time.perf_counter()
     scoring = score_gost_profiles(
@@ -414,7 +460,11 @@ async def analyze_layout(
             "quad_order": ["TL", "TR", "BR", "BL"],
             "quad": quad,
         },
-        "metric_format": _metric_decision_to_dict(metric_decision, calibration_status),
+        "metric_format": _metric_decision_to_dict(
+            metric_decision,
+            calibration_status,
+            metric_consensus,
+        ),
         "rectified": {
             "width_px": rectified.width_px,
             "height_px": rectified.height_px,
@@ -480,22 +530,15 @@ async def rectify_image(
             detail={"layout_status": "reject", "reason": "envelope_quad_not_found", "message": str(exc)},
         ) from exc
 
-    calibration, _ = _load_calibration_status()
-    metric_format = None
-    if calibration is not None:
-        try:
-            metric_measurement = measure_quad_mm(
-                calibration,
-                detection.points,
-                image_width_px=int(image.shape[1]),
-                image_height_px=int(image.shape[0]),
-                frame_contact_sides=detection.frame_contact_sides,
-            )
-            metric_decision = match_format_by_metric(metric_measurement)
-            if metric_decision.status == "resolved":
-                metric_format = metric_decision.format
-        except CameraCalibrationError:
-            metric_format = None
+    metric_decision, metric_consensus, _ = _resolve_metric(image, detection)
+    metric_format = (
+        metric_decision.format
+        if metric_decision is not None
+        and metric_decision.status == "resolved"
+        and metric_consensus is not None
+        and metric_consensus.consistent
+        else None
+    )
 
     rectified = rectify_envelope(image, detection.points)
     scoring_profiles = profiles_for_format(metric_format) if metric_format is not None else DOMESTIC_PROFILES
