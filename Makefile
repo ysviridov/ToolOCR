@@ -4,7 +4,9 @@ TOOLOCR_API_PORT ?= 8080
 TOOLOCR_OCR_PORT ?= 8090
 
 .PHONY: db-up db-down db-logs db-shell import update datasets activate prune reset \
-        migrate-stage11 check-stage11 api-up api-down api-logs api-smoke ocr-up ocr-down ocr-logs ocr-health ocr-smoke test
+        migrate-stage11 check-stage11 api-up api-down api-logs api-smoke \
+        ocr-up ocr-down ocr-logs ocr-health ocr-smoke \
+        layout-profiles layout-smoke layout-rectify test
 
 db-up:
 	$(COMPOSE) up -d db
@@ -80,6 +82,25 @@ ocr-smoke:
 	@curl --fail --silent --show-error -X POST \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/ocr/recognize?preprocess=auto&deskew=true&psm=11&include_alternatives=true" \
 		-F "file=@$(abspath $(FILE))"
+
+# Stage 2.1: геометрия полного письма и ГОСТ-профили.
+layout-profiles:
+	@curl --fail --silent --show-error \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/profiles"
+
+layout-smoke:
+	@test -n "$(FILE)" || (echo "Использование: make layout-smoke FILE=/path/full-envelope.jpg"; exit 2)
+	@curl --fail --silent --show-error -X POST \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/analyze" \
+		-F "file=@$(abspath $(FILE))"
+
+layout-rectify:
+	@test -n "$(FILE)" || (echo "Использование: make layout-rectify FILE=/path/full-envelope.jpg [OUT=/tmp/rectified.jpg]"; exit 2)
+	@curl --fail --silent --show-error -X POST \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/rectify" \
+		-F "file=@$(abspath $(FILE))" \
+		-o "$${OUT:-/tmp/toolocr-rectified.jpg}"
+	@echo "Сохранено: $${OUT:-/tmp/toolocr-rectified.jpg}"
 
 test:
 	python3 tests/test_archive_contract.py "$${ARCHIVE:?Укажите ARCHIVE=/path/ADDRESS_*.zip}"
