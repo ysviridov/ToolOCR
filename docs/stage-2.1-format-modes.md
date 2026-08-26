@@ -47,16 +47,21 @@ POST /v1/layout/analyze?format_mode=session&expected_format=C5
 1. profile scoring ограничивается профилями `expected_format`;
 2. из файла camera calibration выбирается только запись соответствующего формата;
 3. калибровки других форматов не участвуют в consensus и не могут сделать его `inconsistent`;
-4. выполняется независимый sanity-check по метрическому результату и aspect ratio;
-5. сильное противоречие блокирует формат с `format_status=session_mismatch`.
+4. выполняется независимый sanity-check по aspect ratio и диагностическая metric-проверка;
+5. сильное aspect-противоречие блокирует формат с `format_status=session_mismatch`;
+6. одиночное metric-противоречие пока сохраняется как warning, а не blocking condition.
+
+Последнее правило связано с текущей нестабильностью pixel-scale при изменении FOV/масштаба входных снимков. До стабилизации camera calibration нельзя считать одиночный metric mismatch достаточным основанием отклонить заведомо заданную сортировочную пачку. При этом совпадающий metric результат остаётся независимым подтверждением expected format.
 
 Возможные состояния `format_validation.status`:
 
 ```text
-confirmed  — ожидаемый формат подтверждён metric/profile evidence
+confirmed  — ожидаемый формат подтверждён metric и/или profile evidence
 plausible  — сильных противоречий нет, но независимого подтверждения недостаточно
-mismatch   — обнаружено сильное противоречие; format=null
+mismatch   — aspect ratio явно противоречит ожидаемому формату; format=null
 ```
+
+Это особенно надёжно отделяет DL (`aspect≈2.0`) от семейства C6/C5/C4/B4 (`aspect≈1.41`). Различение C6/C5/C4/B4 по одному aspect ratio невозможно и требует стабильной метрической шкалы либо дополнительных profile-признаков.
 
 `session` не является слепым hard-lock: при mismatch downstream не должен строить ROI как будто ожидаемый формат подтверждён.
 
@@ -93,14 +98,16 @@ POST /v1/layout/analyze?format_mode=fixed&expected_format=DL
   "format_validation": {
     "status": "confirmed",
     "expected_format": "C5",
-    "metric_observed_format": "C5",
+    "metric_observed_format": "C6",
     "aspect_error": 0.0123,
     "aspect_tolerance": 0.08,
     "profile_matches_expected": true,
-    "metric_matches_expected": true,
+    "metric_matches_expected": false,
     "blocking": false,
     "reasons": [],
-    "warnings": []
+    "warnings": [
+      "metric_format=C6 противоречит expected_format=C5"
+    ]
   },
   "format_status": "session_confirmed",
   "format": "C5"
@@ -116,6 +123,8 @@ POST /v1/layout/analyze?format_mode=fixed&expected_format=DL
 В `session` и `fixed` выбирается только калибровка `expected_format`. Это устраняет ложную зависимость C5-сессии от DL-калибровки и наоборот.
 
 Если нужной записи нет, `metric_format.calibration.status` принимает `reference_missing`; SESSION при этом может остаться `plausible` или получить подтверждение от profile scoring.
+
+Важно: выбор только своей калибровки устраняет конфликт между reference entries, но сам по себе не делает pixel-scale корректным при смене масштаба/FOV. Поэтому metric mismatch сейчас диагностический, пока не будет стабилизирован camera plane/FOV contract.
 
 ## Test UI
 
