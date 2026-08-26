@@ -80,12 +80,64 @@ Projective homography `homography_norm_to_mm` продолжает хранит�
 
 ## Калибровка
 
-Эталон должен иметь точно известный формат, лежать в production-плоскости и быть полностью видимым.
+Эталон должен иметь точно известный формат и лежать в той же production-плоскости, что и реальные письма.
+
+Endpoint поддерживает два режима проверки эталонного кадра:
+
+```text
+calibration_mode=strict
+calibration_mode=scale_reference
+```
+
+### strict
+
+Режим по умолчанию. Эталон не должен касаться ни одной стороны кадра:
 
 ```bash
 make layout-calibrate FILE=/path/reference-c5.jpg FORMAT=C5
-make layout-calibrate FILE=/path/reference-dl.jpg FORMAT=DL
 ```
+
+Любой `frame_contact_sides` приводит к `422 reference_partial_frame`.
+
+### scale_reference
+
+Режим для фиксированного сортировщика, где письмо штатно лежит у нижней границы изображения при неизменных camera/FOV/perspective.
+
+Разрешён только:
+
+```text
+frame_contact_sides = ["bottom"]
+```
+
+Контакт с `top`, `left` или `right`, в том числе одновременно с `bottom`, остаётся блокирующим и возвращает 422.
+
+Примеры для текущего production-положения письма:
+
+```bash
+make layout-calibrate \
+  FILE=/path/reference-c5.jpg \
+  FORMAT=C5 \
+  CALIBRATION_MODE=scale_reference
+
+make layout-calibrate \
+  FILE=/path/reference-dl.tiff \
+  FORMAT=DL \
+  CALIBRATION_MODE=scale_reference
+```
+
+`scale_reference` допустим только если нижняя физическая сторона письма действительно присутствует в кадре и просто совпадает с нижней границей изображения. Если письмо реально обрезано, такую фотографию использовать как эталон нельзя.
+
+Запись сохраняет диагностические поля:
+
+```json
+{
+  "calibration_mode": "scale_reference",
+  "reference_frame_contact_sides": ["bottom"],
+  "reference_bottom_anchored": true
+}
+```
+
+Для такой записи подразумевается та же физическая установка камеры и тот же FOV, что и при production-съёмке. Ручной resize, perspective correction или изменение масштаба эталонного изображения недопустимы.
 
 Каждая команда обновляет только свою запись. C5 не удаляет DL и наоборот.
 
@@ -94,6 +146,8 @@ make layout-calibrate FILE=/path/reference-dl.jpg FORMAT=DL
 ```bash
 make layout-calibrations
 ```
+
+Команда дополнительно показывает `calibration_mode`, `reference_bottom_anchored`, `px_per_mm_x` и `px_per_mm_y`, чтобы C5/DL можно было сравнить напрямую.
 
 ## Совместимость старых записей
 
@@ -108,13 +162,13 @@ px_per_mm_y
 
 остаются читаемыми. ToolOCR восстанавливает исходный эталонный quad через inverse homography и вычисляет pixel-scale автоматически.
 
+У старых записей также могут отсутствовать `calibration_mode` и `reference_bottom_anchored`; это не мешает их загрузке.
+
 Поэтому массовая повторная калибровка только ради нового формата JSON не требуется.
 
 ## Consensus нескольких эталонов
 
-Формат production-письма заранее неизвестен, поэтому нельзя выбирать калибровку по предполагаемому формату.
-
-Каждый сохранённый эталон независимо измеряет production quad через свой `px/mm`. Затем ToolOCR берёт медианный consensus.
+В режиме `format_mode=auto` формат production-письма заранее неизвестен, поэтому каждый сохранённый эталон независимо измеряет production quad через свой `px/mm`. Затем ToolOCR берёт медианный consensus.
 
 Пример:
 
@@ -149,6 +203,8 @@ px_per_mm_y
 - плохое выделение внешнего quad;
 - заметную нелинейную дисторсию в разных частях кадра.
 
+В `format_mode=session/fixed` используется только калибровка `expected_format`, поэтому калибровка другого формата не участвует в consensus.
+
 ## Что теперь допустимо
 
 Допустимо изменение:
@@ -167,6 +223,8 @@ px_per_mm_y
 ## Partial frame
 
 Если одна физическая сторона действительно обрезана кадром, соответствующее измерение остаётся `lower_bound`. Например при контакте только с нижней границей полная ширина остаётся сильным метрическим признаком.
+
+Это поведение production analysis не следует смешивать с `scale_reference`: при создании эталона мы разрешаем `bottom` только в заранее известной конфигурации сортировщика и предполагаем, что физическая нижняя сторона письма не потеряна.
 
 ## Диагностика
 
