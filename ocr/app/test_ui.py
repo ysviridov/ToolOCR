@@ -17,7 +17,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
+from .format_modes import FormatMode
 from .frame_normalization import normalize_black_background
+from .gost_r_51506_99 import EnvelopeFormat
 from .layout_api import MAX_PIXELS, MAX_UPLOAD_BYTES, analyze_layout
 
 
@@ -34,6 +36,8 @@ MAX_FOLDER_NAME = 80
 
 class TestRunRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=MAX_TEST_FILES_PER_RUN)
+    format_mode: FormatMode = FormatMode.AUTO
+    expected_format: EnvelopeFormat | None = None
 
 
 class DeleteRequest(BaseModel):
@@ -473,12 +477,15 @@ async def run_test(request: TestRunRequest) -> dict[str, Any]:
                     include_debug_images=False,
                     min_area_ratio=0.15,
                     scoring_top_n=8,
+                    format_mode=request.format_mode,
+                    expected_format=request.expected_format,
                 )
             finally:
                 await upload.close()
 
             format_value = analysis.get("format")
             format_status = analysis.get("format_status")
+            format_validation = analysis.get("format_validation") or {}
             orientation = analysis.get("orientation") or {}
             normalization = analysis.get("frame_normalization") or {}
             timing = analysis.get("timing") or {}
@@ -491,6 +498,9 @@ async def run_test(request: TestRunRequest) -> dict[str, Any]:
                     "folder_name": folders.get(folder_id, {}).get("name") if folder_id else None,
                     "ok": True,
                     "layout_status": analysis.get("layout_status"),
+                    "format_mode": analysis.get("format_mode"),
+                    "expected_format": analysis.get("expected_format"),
+                    "format_validation_status": format_validation.get("status"),
                     "format": format_value,
                     "format_status": format_status,
                     "orientation_status": orientation.get("status"),
@@ -518,6 +528,9 @@ async def run_test(request: TestRunRequest) -> dict[str, Any]:
                     "folder_name": folders.get(folder_id, {}).get("name") if folder_id else None,
                     "ok": False,
                     "layout_status": "error",
+                    "format_mode": request.format_mode.value,
+                    "expected_format": request.expected_format.value if request.expected_format else None,
+                    "format_validation_status": "error",
                     "format": None,
                     "format_status": None,
                     "orientation_status": None,
@@ -537,6 +550,9 @@ async def run_test(request: TestRunRequest) -> dict[str, Any]:
                     "folder_name": None,
                     "ok": False,
                     "layout_status": "error",
+                    "format_mode": request.format_mode.value,
+                    "expected_format": request.expected_format.value if request.expected_format else None,
+                    "format_validation_status": "error",
                     "format": None,
                     "format_status": None,
                     "orientation_status": None,
@@ -547,4 +563,9 @@ async def run_test(request: TestRunRequest) -> dict[str, Any]:
                     "debug": {"error": type(exc).__name__, "message": str(exc)},
                 }
             )
-    return {"count": len(results), "results": results}
+    return {
+        "count": len(results),
+        "format_mode": request.format_mode.value,
+        "expected_format": request.expected_format.value if request.expected_format else None,
+        "results": results,
+    }
