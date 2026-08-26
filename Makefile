@@ -95,21 +95,24 @@ layout-smoke:
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/analyze" \
 		-F "file=@$(abspath $(FILE))"
 
-# Калибровка фиксированной камеры по полностью видимому эталону известного
-# ГОСТ-формата. Каждый FORMAT обновляет только свою запись в общем JSON.
-# Разные записи могут относиться к разным FOV/crop входного кадра.
+# Калибровка фиксированной камеры по эталону известного ГОСТ-формата.
+# CALIBRATION_MODE=strict (по умолчанию) требует отсутствие контакта с рамкой.
+# CALIBRATION_MODE=scale_reference допускает штатный контакт только с bottom.
+# Каждый FORMAT обновляет только свою запись в общем JSON.
 # Старый одноформатный v1-файл автоматически мигрирует в набор version=2.
 layout-calibrate:
-	@test -n "$(FILE)" || (echo "Использование: make layout-calibrate FILE=/path/reference.jpg FORMAT=C4 [OUT=config/camera-calibration.json]"; exit 2)
+	@test -n "$(FILE)" || (echo "Использование: make layout-calibrate FILE=/path/reference.jpg FORMAT=C4 [CALIBRATION_MODE=strict|scale_reference] [OUT=config/camera-calibration.json]"; exit 2)
 	@test -n "$(FORMAT)" || (echo "Укажите FORMAT=C6|DL|C5|C4|B4"; exit 2)
 	@set -euo pipefail; \
+	mode="$${CALIBRATION_MODE:-strict}"; \
+	case "$$mode" in strict|scale_reference) ;; *) echo "Укажите CALIBRATION_MODE=strict|scale_reference" >&2; exit 2 ;; esac; \
 	out="$${OUT:-config/camera-calibration.json}"; \
 	mkdir -p "$$(dirname "$$out")"; \
 	entry="$$out.entry.tmp"; \
 	merged="$$out.tmp"; \
 	trap 'rm -f "$$entry" "$$merged"' EXIT; \
 	curl --fail-with-body --silent --show-error -X POST \
-		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/calibration/estimate?known_format=$(FORMAT)" \
+		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/calibration/estimate?known_format=$(FORMAT)&calibration_mode=$$mode" \
 		-F "file=@$(abspath $(FILE))" \
 		| jq -e '.calibration' > "$$entry"; \
 	jq -e '.version == 1 and .homography_norm_to_mm and .reference_format and .standard' "$$entry" >/dev/null; \
@@ -122,13 +125,13 @@ layout-calibrate:
 	mv "$$merged" "$$out"; \
 	rm -f "$$entry"; \
 	trap - EXIT; \
-	echo "Калибровка $(FORMAT) сохранена/обновлена: $$out"; \
-	jq --arg f "$(FORMAT)" '{version, standard, count:(.calibrations|length), formats:(.calibrations|keys), updated:(.calibrations[$$f] | {reference_format, image_width_px, image_height_px, image_aspect_ratio})}' "$$out"
+	echo "Калибровка $(FORMAT) ($$mode) сохранена/обновлена: $$out"; \
+	jq --arg f "$(FORMAT)" '{version, standard, count:(.calibrations|length), formats:(.calibrations|keys), updated:(.calibrations[$$f] | {reference_format, calibration_mode, reference_bottom_anchored, reference_frame_contact_sides, image_width_px, image_height_px, image_aspect_ratio, px_per_mm_x, px_per_mm_y})}' "$$out"
 
 layout-calibrations:
 	@out="$${OUT:-config/camera-calibration.json}"; \
 	test -s "$$out" || (echo "Файл калибровок не найден: $$out"; exit 2); \
-	jq 'if .calibrations then {version, standard, count:(.calibrations|length), calibrations:(.calibrations | to_entries | map({format:.key, image_width_px:.value.image_width_px, image_height_px:.value.image_height_px, image_aspect_ratio:.value.image_aspect_ratio}))} else {version, standard, count:1, calibrations:[{format:.reference_format, image_width_px, image_height_px, image_aspect_ratio}]} end' "$$out"
+	jq 'if .calibrations then {version, standard, count:(.calibrations|length), calibrations:(.calibrations | to_entries | map({format:.key, calibration_mode:.value.calibration_mode, reference_bottom_anchored:.value.reference_bottom_anchored, image_width_px:.value.image_width_px, image_height_px:.value.image_height_px, image_aspect_ratio:.value.image_aspect_ratio, px_per_mm_x:.value.px_per_mm_x, px_per_mm_y:.value.px_per_mm_y}))} else {version, standard, count:1, calibrations:[{format:.reference_format, calibration_mode, reference_bottom_anchored, image_width_px, image_height_px, image_aspect_ratio, px_per_mm_x, px_per_mm_y}]} end' "$$out"
 
 # По умолчанию /rectify применяет автоматически определённый поворот 0/180.
 layout-rectify:
