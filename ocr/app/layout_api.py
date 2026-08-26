@@ -18,6 +18,12 @@ from .camera_calibration import (
     match_format_by_metric,
     measure_quad_mm_consensus,
 )
+from .format_modes import (
+    FormatMode,
+    decide_format,
+    expected_aspect_error,
+    require_expected_format,
+)
 from .frame_normalization import (
     detection_to_source,
     normalization_to_dict,
@@ -41,6 +47,7 @@ CAMERA_CALIBRATION_PATH = os.environ.get(
     "LAYOUT_CAMERA_CALIBRATION",
     "/app/config/camera-calibration.json",
 )
+FORMAT_RATIO_TOLERANCE = 0.08
 
 
 def _round_ms(value: float) -> float:
@@ -156,11 +163,30 @@ def _measurement_to_dict(measurement: Any) -> dict[str, Any]:
     }
 
 
-def _load_calibration_status() -> tuple[tuple[Any, ...], dict[str, Any]]:
+def _validate_format_contract(
+    format_mode: FormatMode,
+    expected_format: EnvelopeFormat | None,
+) -> EnvelopeFormat | None:
+    try:
+        return require_expected_format(format_mode, expected_format)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason": "expected_format_required",
+                "format_mode": format_mode.value,
+                "message": str(exc),
+            },
+        ) from exc
+
+
+def _load_calibration_status(
+    reference_format: EnvelopeFormat | None = None,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
     if not CAMERA_CALIBRATION_PATH:
         return (), {"status": "disabled", "path": None}
     try:
-        calibrations = load_plane_calibrations(CAMERA_CALIBRATION_PATH)
+        all_calibrations = load_plane_calibrations(CAMERA_CALIBRATION_PATH)
     except CameraCalibrationError as exc:
         return (), {
             "status": "unavailable",
@@ -168,11 +194,30 @@ def _load_calibration_status() -> tuple[tuple[Any, ...], dict[str, Any]]:
             "reason": str(exc),
         }
 
+    available_formats = [item.reference_format for item in all_calibrations]
+    if reference_format is None:
+        calibrations = all_calibrations
+    else:
+        calibrations = tuple(
+            item for item in all_calibrations
+            if item.reference_format == reference_format.value
+        )
+        if not calibrations:
+            return (), {
+                "status": "reference_missing",
+                "path": CAMERA_CALIBRATION_PATH,
+                "requested_reference_format": reference_format.value,
+                "available_reference_formats": available_formats,
+                "reason": f"Нет калибровки для expected_format={reference_format.value}",
+            }
+
     return calibrations, {
         "status": "loaded",
         "path": CAMERA_CALIBRATION_PATH,
         "count": len(calibrations),
         "reference_formats": [item.reference_format for item in calibrations],
+        "available_reference_formats": available_formats,
+        "requested_reference_format": reference_format.value if reference_format is not None else None,
         "metric_mode": "quad_pixel_scale",
         "entries": [
             {
@@ -259,8 +304,10 @@ def _normalize_and_detect(image: np.ndarray, *, min_area_ratio: float) -> tuple[
 def _resolve_metric(
     image: np.ndarray,
     detection: Any,
+    *,
+    reference_format: EnvelopeFormat | None = None,
 ) -> tuple[Any | None, CalibrationConsensus | None, dict[str, Any]]:
-    calibrations, status = _load_calibration_status()
+    calibrations, status = _load_calibration_status(reference_format)
     if not calibrations:
         return None, None, status
 
@@ -291,6 +338,32 @@ def _resolve_metric(
         }
 
     return match_format_by_metric(consensus.measurement), consensus, status
+
+
+def _profile_candidates_for_mode(
+    *,
+    format_mode: FormatMode,
+    expected_format: EnvelopeFormat | None,
+    format_candidates: tuple[Any, ...],
+    rectified_width_px: int,
+    rectified_height_px: int,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if format_mode is FormatMode.AUTO:
+        for candidate in format_candidates:
+            for profile in profiles_for_format(candidate.format):
+                result.append(_profile_to_dict(profile, candidate.ratio_error))
+        return result
+
+    assert expected_format is not None
+    ratio_error = expected_aspect_error(
+        rectified_width_px,
+        rectified_height_px,
+        expected_format,
+    )
+    for profile in profiles_for_format(expected_format):
+        result.append(_profile_to_dict(profile, round(ratio_error, 6)))
+    return result
 
 
 @router.get("/profiles")
@@ -372,8 +445,11 @@ async def analyze_layout(
     include_debug_images: bool = Query(default=False),
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
     scoring_top_n: int = Query(default=8, ge=1, le=32),
+    format_mode: FormatMode = Query(default=FormatMode.AUTO),
+    expected_format: EnvelopeFormat | None = Query(default=None),
 ) -> dict[str, Any]:
     total_started = time.perf_counter()
+    expected = _validate_format_contract(format_mode, expected_format)
 
     decode_started = time.perf_counter()
     raw, image = await _read_and_decode(file)
@@ -398,7 +474,12 @@ async def analyze_layout(
     detect_ms = (time.perf_counter() - detect_started) * 1000.0
 
     metric_started = time.perf_counter()
-    metric_decision, metric_consensus, calibration_status = _resolve_metric(image, detection)
+    metric_reference = expected if format_mode is not FormatMode.AUTO else None
+    metric_decision, metric_consensus, calibration_status = _resolve_metric(
+        image,
+        detection,
+        reference_format=metric_reference,
+    )
     metric_ms = (time.perf_counter() - metric_started) * 1000.0
 
     rectify_started = time.perf_counter()
@@ -406,23 +487,34 @@ async def analyze_layout(
     rectify_ms = (time.perf_counter() - rectify_started) * 1000.0
 
     candidate_started = time.perf_counter()
-    format_candidates = candidate_formats_by_aspect_ratio(
+    format_candidates = tuple(candidate_formats_by_aspect_ratio(
         rectified.width_px,
         rectified.height_px,
-        max_relative_error=0.08,
+        max_relative_error=FORMAT_RATIO_TOLERANCE,
+    ))
+    profile_candidates = _profile_candidates_for_mode(
+        format_mode=format_mode,
+        expected_format=expected,
+        format_candidates=format_candidates,
+        rectified_width_px=rectified.width_px,
+        rectified_height_px=rectified.height_px,
     )
-    profile_candidates: list[dict[str, Any]] = []
-    for candidate in format_candidates:
-        for profile in profiles_for_format(candidate.format):
-            profile_candidates.append(_profile_to_dict(profile, candidate.ratio_error))
     candidate_ms = (time.perf_counter() - candidate_started) * 1000.0
 
-    metric_format = (
+    metric_observed_format = (
         metric_decision.format
         if metric_decision is not None and metric_decision.status == "resolved"
         else None
     )
-    scoring_profiles = profiles_for_format(metric_format) if metric_format is not None else DOMESTIC_PROFILES
+    if format_mode is FormatMode.AUTO:
+        scoring_profiles = (
+            profiles_for_format(metric_observed_format)
+            if metric_observed_format is not None
+            else DOMESTIC_PROFILES
+        )
+    else:
+        assert expected is not None
+        scoring_profiles = profiles_for_format(expected)
 
     scoring_started = time.perf_counter()
     scoring = score_gost_profiles(
@@ -431,7 +523,7 @@ async def analyze_layout(
         frame_contact_sides=detection.frame_contact_sides,
         profile_min_margin=(
             0.055
-            if metric_format is not None
+            if format_mode is not FormatMode.AUTO or metric_observed_format is not None
             else (0.085 if detection.frame_contact_sides else 0.055)
         ),
     )
@@ -442,27 +534,17 @@ async def analyze_layout(
         if scoring.profile.profile_id is not None
         else None
     )
-
-    if metric_format is not None:
-        format_status = (
-            "resolved_by_camera_calibration_partial_frame"
-            if detection.frame_contact_sides
-            else "resolved_by_camera_calibration"
-        )
-    elif selected_profile is not None:
-        format_status = (
-            "resolved_by_profile_scoring_partial_frame"
-            if detection.frame_contact_sides
-            else "resolved_by_profile_scoring"
-        )
-    elif detection.frame_contact_sides:
-        format_status = "unreliable_partial_frame"
-    elif not format_candidates:
-        format_status = "unknown"
-    elif len(format_candidates) == 1:
-        format_status = "resolved_by_ratio"
-    else:
-        format_status = "ambiguous_by_ratio"
+    format_decision = decide_format(
+        format_mode=format_mode,
+        expected_format=expected,
+        metric_decision=metric_decision,
+        selected_profile=selected_profile,
+        format_candidates=format_candidates,
+        rectified_width_px=rectified.width_px,
+        rectified_height_px=rectified.height_px,
+        partial_frame=bool(detection.frame_contact_sides),
+        ratio_tolerance=FORMAT_RATIO_TOLERANCE,
+    )
 
     debug_images = None
     if include_debug_images:
@@ -520,6 +602,9 @@ async def analyze_layout(
             "quad_order": ["TL", "TR", "BR", "BL"],
             "quad": quad,
         },
+        "format_mode": format_mode.value,
+        "expected_format": expected.value if expected is not None else None,
+        "format_validation": format_decision.validation,
         "metric_format": _metric_decision_to_dict(
             metric_decision,
             calibration_status,
@@ -544,12 +629,12 @@ async def analyze_layout(
                 for item in scoring.orientation_evidence
             ],
         },
-        "format_status": format_status,
-        "format": metric_format.value if metric_format is not None else (
-            selected_profile.format.value if selected_profile is not None else None
-        ),
+        "format_status": format_decision.status,
+        "format": format_decision.format.value if format_decision.format is not None else None,
         "format_candidates": candidates_json,
-        "profile_scope": "domestic",
+        "profile_scope": (
+            "domestic" if format_mode is FormatMode.AUTO else f"expected_format:{expected.value}"
+        ),
         "profile_candidates": profile_candidates,
         "profile_scoring": {
             "status": scoring.profile.status,
@@ -585,7 +670,10 @@ async def rectify_image(
         default=True,
         description="Если ориентация 0/180 определена, вернуть изображение текстом вверх",
     ),
+    format_mode: FormatMode = Query(default=FormatMode.AUTO),
+    expected_format: EnvelopeFormat | None = Query(default=None),
 ) -> Response:
+    expected = _validate_format_contract(format_mode, expected_format)
     _, image = await _read_and_decode(file)
     try:
         normalization, detection = _normalize_and_detect(image, min_area_ratio=min_area_ratio)
@@ -595,22 +683,54 @@ async def rectify_image(
             detail={"layout_status": "reject", "reason": "envelope_quad_not_found", "message": str(exc)},
         ) from exc
 
-    metric_decision, metric_consensus, _ = _resolve_metric(image, detection)
-    metric_format = (
+    metric_reference = expected if format_mode is not FormatMode.AUTO else None
+    metric_decision, _, _ = _resolve_metric(
+        image,
+        detection,
+        reference_format=metric_reference,
+    )
+    metric_observed_format = (
         metric_decision.format
-        if metric_decision is not None
-        and metric_decision.status == "resolved"
-        and metric_consensus is not None
-        and metric_consensus.consistent
+        if metric_decision is not None and metric_decision.status == "resolved"
         else None
     )
 
     rectified = rectify_envelope(image, detection.points)
-    scoring_profiles = profiles_for_format(metric_format) if metric_format is not None else DOMESTIC_PROFILES
+    if format_mode is FormatMode.AUTO:
+        scoring_profiles = (
+            profiles_for_format(metric_observed_format)
+            if metric_observed_format is not None
+            else DOMESTIC_PROFILES
+        )
+    else:
+        assert expected is not None
+        scoring_profiles = profiles_for_format(expected)
+
     scoring = score_gost_profiles(
         rectified.image,
         scoring_profiles,
         frame_contact_sides=detection.frame_contact_sides,
+    )
+    selected_profile = (
+        PROFILE_BY_ID.get(scoring.profile.profile_id)
+        if scoring.profile.profile_id is not None
+        else None
+    )
+    format_candidates = tuple(candidate_formats_by_aspect_ratio(
+        rectified.width_px,
+        rectified.height_px,
+        max_relative_error=FORMAT_RATIO_TOLERANCE,
+    ))
+    format_decision = decide_format(
+        format_mode=format_mode,
+        expected_format=expected,
+        metric_decision=metric_decision,
+        selected_profile=selected_profile,
+        format_candidates=format_candidates,
+        rectified_width_px=rectified.width_px,
+        rectified_height_px=rectified.height_px,
+        partial_frame=bool(detection.frame_contact_sides),
+        ratio_tolerance=FORMAT_RATIO_TOLERANCE,
     )
 
     output = rectified.image
@@ -631,7 +751,12 @@ async def rectify_image(
             "X-ToolOCR-Quad-Confidence": f"{detection.confidence:.4f}",
             "X-ToolOCR-Frame-Status": detection.frame_status,
             "X-ToolOCR-Frame-Contact-Sides": ",".join(detection.frame_contact_sides),
-            "X-ToolOCR-Format": metric_format.value if metric_format is not None else "ambiguous",
+            "X-ToolOCR-Format-Mode": format_mode.value,
+            "X-ToolOCR-Expected-Format": expected.value if expected is not None else "",
+            "X-ToolOCR-Format-Status": format_decision.status,
+            "X-ToolOCR-Format": (
+                format_decision.format.value if format_decision.format is not None else "ambiguous"
+            ),
             "X-ToolOCR-Orientation-Status": scoring.orientation.status,
             "X-ToolOCR-Orientation": (
                 str(scoring.orientation.value_deg)
