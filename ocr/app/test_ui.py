@@ -25,6 +25,7 @@ router = APIRouter(tags=["test-ui"])
 TEST_STORAGE_DIR = Path(os.environ.get("TEST_UI_STORAGE_DIR", "/app/test-data"))
 MAX_TEST_FILES_PER_RUN = int(os.environ.get("TEST_UI_MAX_FILES_PER_RUN", "100"))
 ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+BROWSER_NATIVE_PREVIEW_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 HTML_PATH = Path(__file__).with_name("test_ui.html")
 FOLDERS_PATH = TEST_STORAGE_DIR / "folders.json"
@@ -397,7 +398,12 @@ def delete_test_images(request: DeleteRequest) -> dict[str, Any]:
 
 @router.get("/v1/test-ui/images/{file_id}/original", response_class=Response)
 def original_image(file_id: str) -> Response:
-    """Возвращает исходный файл из постоянной тестовой библиотеки без преобразований."""
+    """Показывает исходное изображение; TIFF/BMP транскодируются только для preview.
+
+    Файл в постоянном volume никогда не изменяется. Форматы, которые обычно
+    отображаются браузером напрямую, возвращаются байт-в-байт. TIFF/BMP для
+    окна просмотра декодируются OpenCV и кодируются во временный JPEG в памяти.
+    """
 
     meta = _load_metadata(_validate_file_id(file_id))
     path = _image_path(meta)
@@ -405,15 +411,28 @@ def original_image(file_id: str) -> Response:
         raw = path.read_bytes()
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Не удалось прочитать исходное изображение") from exc
-    media_type = mimetypes.guess_type(meta.get("name") or path.name)[0] or "application/octet-stream"
+
+    common_headers = {
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+    suffix = str(meta.get("suffix", "")).lower()
+    if suffix in BROWSER_NATIVE_PREVIEW_SUFFIXES:
+        media_type = mimetypes.guess_type(meta.get("name") or path.name)[0] or "application/octet-stream"
+        return Response(
+            content=raw,
+            media_type=media_type,
+            headers={**common_headers, "X-ToolOCR-Preview-Transcoded": "0"},
+        )
+
+    image = _decode_image(raw)
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Не удалось подготовить preview исходного изображения")
     return Response(
-        content=raw,
-        media_type=media_type,
-        headers={
-            "Cache-Control": "no-store, max-age=0",
-            "Pragma": "no-cache",
-            "Content-Disposition": f'inline; filename="{path.name}"',
-        },
+        content=encoded.tobytes(),
+        media_type="image/jpeg",
+        headers={**common_headers, "X-ToolOCR-Preview-Transcoded": "1"},
     )
 
 
