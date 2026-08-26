@@ -8,7 +8,7 @@
     :root { color-scheme:light; --bg:#f5f6f8; --card:#fff; --line:#d9dde5; --text:#20242b; --muted:#68707d; --accent:#2f67d8; --danger:#b42318; --ok:#137333; --warn:#9a6700; }
     * { box-sizing:border-box; }
     body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--text); background:var(--bg); }
-    main { max-width:1500px; margin:0 auto; padding:24px; }
+    main { width:max-content; min-width:100%; max-width:none; margin:0; padding:24px; }
     h1 { margin:0 0 4px; font-size:26px; }
     h2 { margin:0; font-size:18px; }
     .muted { color:var(--muted); }
@@ -27,8 +27,8 @@
     button.danger { color:var(--danger); border-color:#e7b6b0; }
     button:disabled { opacity:.5; cursor:not-allowed; }
     .status { margin-left:auto; color:var(--muted); }
-    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:9px; }
-    table { width:100%; border-collapse:collapse; min-width:1050px; }
+    .table-wrap { overflow:visible; border:1px solid var(--line); border-radius:9px; }
+    table { width:max-content; min-width:100%; border-collapse:collapse; }
     th,td { padding:9px 10px; border-bottom:1px solid #e7eaf0; text-align:left; vertical-align:middle; }
     th { background:#f7f8fa; font-size:12px; text-transform:uppercase; letter-spacing:.02em; color:#5a6270; position:sticky; top:0; }
     tbody tr:last-child td { border-bottom:0; }
