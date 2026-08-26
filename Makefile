@@ -110,11 +110,16 @@ layout-calibrate:
 	mkdir -p "$$(dirname "$$out")"; \
 	entry="$$out.entry.tmp"; \
 	merged="$$out.tmp"; \
-	trap 'rm -f "$$entry" "$$merged"' EXIT; \
-	curl --fail-with-body --silent --show-error -X POST \
+	response="$$out.response.tmp"; \
+	trap 'rm -f "$$entry" "$$merged" "$$response"' EXIT; \
+	if ! curl --fail-with-body --silent --show-error -X POST \
 		"http://localhost:$(TOOLOCR_OCR_PORT)/v1/layout/calibration/estimate?known_format=$(FORMAT)&calibration_mode=$$mode" \
-		-F "file=@$(abspath $(FILE))" \
-		| jq -e '.calibration' > "$$entry"; \
+		-F "file=@$(abspath $(FILE))" -o "$$response"; then \
+		echo "Ошибка калибровки $(FORMAT) ($$mode):" >&2; \
+		jq . "$$response" 2>/dev/null || cat "$$response" >&2; \
+		exit 1; \
+	fi; \
+	jq -e '.calibration' "$$response" > "$$entry"; \
 	jq -e '.version == 1 and .homography_norm_to_mm and .reference_format and .standard' "$$entry" >/dev/null; \
 	if [[ -s "$$out" ]]; then \
 		jq --slurpfile e "$$entry" '($$e[0]) as $$new | if (.version == 2 and (.calibrations | type) == "object") then if .standard != $$new.standard then error("standard mismatch") else .calibrations[$$new.reference_format] = $$new end elif (has("homography_norm_to_mm") and has("reference_format")) then . as $$old | if $$old.standard != $$new.standard then error("standard mismatch") else {version: 2, standard: $$new.standard, calibrations: ({($$old.reference_format): $$old} + {($$new.reference_format): $$new})} end else error("unsupported calibration file") end' "$$out" > "$$merged"; \
@@ -123,7 +128,7 @@ layout-calibrate:
 	fi; \
 	jq -e '.version == 2 and (.calibrations | type) == "object" and (.calibrations | length) > 0' "$$merged" >/dev/null; \
 	mv "$$merged" "$$out"; \
-	rm -f "$$entry"; \
+	rm -f "$$entry" "$$response"; \
 	trap - EXIT; \
 	echo "Калибровка $(FORMAT) ($$mode) сохранена/обновлена: $$out"; \
 	jq --arg f "$(FORMAT)" '{version, standard, count:(.calibrations|length), formats:(.calibrations|keys), updated:(.calibrations[$$f] | {reference_format, calibration_mode, reference_bottom_anchored, reference_frame_contact_sides, image_width_px, image_height_px, image_aspect_ratio, px_per_mm_x, px_per_mm_y})}' "$$out"
