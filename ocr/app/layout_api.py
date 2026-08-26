@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 
+from .calibration_modes import CalibrationMode, validate_calibration_frame
 from .camera_calibration import (
     CameraCalibrationError,
     CalibrationConsensus,
@@ -381,6 +382,13 @@ async def estimate_camera_calibration(
     file: UploadFile = File(..., description="Полная фотография эталонного конверта"),
     known_format: EnvelopeFormat = Query(..., description="Физический формат эталона по ГОСТ"),
     min_area_ratio: float = Query(default=0.15, ge=0.05, le=0.90),
+    calibration_mode: CalibrationMode = Query(
+        default=CalibrationMode.STRICT,
+        description=(
+            "strict требует эталон без контакта с границей; "
+            "scale_reference допускает штатный контакт только с bottom"
+        ),
+    ),
 ) -> dict[str, Any]:
     """Строит запись калибровки по эталону, предварительно убрав черный фон."""
 
@@ -393,14 +401,20 @@ async def estimate_camera_calibration(
             detail={"calibration_status": "reject", "reason": "envelope_quad_not_found", "message": str(exc)},
         ) from exc
 
-    if detection.frame_contact_sides:
+    frame_validation = validate_calibration_frame(
+        calibration_mode,
+        detection.frame_contact_sides,
+    )
+    if not frame_validation.accepted:
         raise HTTPException(
             status_code=422,
             detail={
                 "calibration_status": "reject",
                 "reason": "reference_partial_frame",
-                "frame_contact_sides": list(detection.frame_contact_sides),
-                "message": "Калибровочный эталон должен целиком попадать в кадр",
+                "calibration_mode": calibration_mode.value,
+                "frame_contact_sides": list(frame_validation.contact_sides),
+                "allowed_frame_contact_sides": list(frame_validation.allowed_contact_sides),
+                "message": frame_validation.reason,
             },
         )
 
@@ -418,10 +432,20 @@ async def estimate_camera_calibration(
             detail={"calibration_status": "reject", "reason": "calibration_geometry", "message": str(exc)},
         ) from exc
 
+    calibration_payload = calibration_to_dict(calibration)
+    calibration_payload.update(
+        {
+            "calibration_mode": calibration_mode.value,
+            "reference_frame_contact_sides": list(frame_validation.contact_sides),
+            "reference_bottom_anchored": "bottom" in frame_validation.contact_sides,
+        }
+    )
+
     return {
         "stage": "2.1",
         "standard": GOST_ID,
         "calibration_status": "estimated",
+        "calibration_mode": calibration_mode.value,
         "input": {
             "filename": file.filename,
             "bytes_received": len(raw),
@@ -434,8 +458,13 @@ async def estimate_camera_calibration(
             "method": detection.method,
             "confidence": detection.confidence,
             "frame_status": detection.frame_status,
+            "frame_contact_sides": list(detection.frame_contact_sides),
         },
-        "calibration": calibration_to_dict(calibration),
+        "reference_validation": {
+            "accepted": frame_validation.accepted,
+            "allowed_frame_contact_sides": list(frame_validation.allowed_contact_sides),
+        },
+        "calibration": calibration_payload,
     }
 
 
