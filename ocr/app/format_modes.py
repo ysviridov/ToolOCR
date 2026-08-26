@@ -123,9 +123,14 @@ def decide_format(
     )
     metric_matches = metric_format == expected
     reasons: list[str] = []
+    warnings: list[str] = []
 
+    # Текущая pixel-scale calibration может стать недостоверной после смены
+    # FOV/масштаба upstream. Поэтому одиночное metric-противоречие пока не
+    # блокирует SESSION, но остаётся явным warning. Совпадение metric всё ещё
+    # является независимым подтверждением expected_format.
     if metric_format is not None and metric_format != expected:
-        reasons.append(
+        warnings.append(
             f"metric_format={metric_format.value} противоречит expected_format={expected.value}"
         )
     if aspect_error > ratio_tolerance:
@@ -151,12 +156,12 @@ def decide_format(
                 "status": "fixed",
                 "blocking": False,
                 "reasons": [],
-                "warnings": reasons,
+                "warnings": warnings + reasons,
             },
         )
 
-    # SESSION: expected_format — сильный constraint, но независимые сильные
-    # противоречия блокируют дальнейшее использование формата.
+    # SESSION: aspect ratio — безопасный сильный sanity-check (например DL vs
+    # семейство C5/C6/C4/B4). Metric mismatch до стабилизации FOV — warning.
     if reasons:
         return FormatDecision(
             format=None,
@@ -166,7 +171,7 @@ def decide_format(
                 "status": "mismatch",
                 "blocking": True,
                 "reasons": reasons,
-                "warnings": [],
+                "warnings": warnings,
             },
         )
 
@@ -185,6 +190,6 @@ def decide_format(
             "status": validation_status,
             "blocking": False,
             "reasons": [],
-            "warnings": [],
+            "warnings": warnings,
         },
     )
