@@ -17,19 +17,23 @@
     .drop.drag { border-color:var(--accent); background:#eef4ff; }
     .drop strong { display:block; font-size:17px; margin-bottom:6px; }
     .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+    .toolbar.compact { margin:10px 0 12px; }
     .result-head { margin:0 0 14px; }
     .result-head h2 { margin-right:auto; }
+    .field { display:flex; align-items:center; gap:7px; color:var(--muted); font-weight:600; }
+    select { border:1px solid #aeb7c6; background:#fff; color:var(--text); border-radius:8px; padding:8px 10px; min-width:210px; }
     button { border:1px solid #aeb7c6; background:#fff; color:var(--text); border-radius:8px; padding:8px 12px; cursor:pointer; font-weight:600; }
     button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
     button.danger { color:var(--danger); border-color:#e7b6b0; }
     button:disabled { opacity:.5; cursor:not-allowed; }
     .status { margin-left:auto; color:var(--muted); }
     .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:9px; }
-    table { width:100%; border-collapse:collapse; min-width:950px; }
+    table { width:100%; border-collapse:collapse; min-width:1050px; }
     th,td { padding:9px 10px; border-bottom:1px solid #e7eaf0; text-align:left; vertical-align:middle; }
     th { background:#f7f8fa; font-size:12px; text-transform:uppercase; letter-spacing:.02em; color:#5a6270; position:sticky; top:0; }
     tbody tr:last-child td { border-bottom:0; }
     .name { max-width:430px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .folder-name { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .pill { display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; background:#eef1f5; }
     .pill.ok { color:var(--ok); background:#e7f4ea; }
     .pill.warn { color:var(--warn); background:#fff5d6; }
@@ -56,16 +60,20 @@
     .json-key{color:#7ee787}.json-string{color:#a5d6ff}.json-number{color:#79c0ff}.json-boolean{color:#ff7b72}.json-null{color:#d2a8ff}
     #cropImage { display:block; max-width:100%; max-height:75vh; margin:auto; background:#222; }
     .upload-errors { margin-top:10px; color:var(--danger); white-space:pre-wrap; }
-    @media (max-width:700px) { main{padding:12px}.card{padding:12px}.status{width:100%;margin-left:0} }
+    @media (max-width:700px) { main{padding:12px}.card{padding:12px}.status{width:100%;margin-left:0}.field{width:100%;align-items:flex-start;flex-direction:column}.field select{width:100%} }
   </style>
 </head>
 <body>
 <main>
   <h1>ToolOCR — тестирование Stage 2.1</h1>
-  <div class="muted">Исходные тестовые изображения хранятся в постоянном Docker volume. Normalized crop генерируется по запросу и на диск не сохраняется.</div>
+  <div class="muted">Исходные тестовые изображения и папки хранятся в постоянном Docker volume. Normalized crop генерируется по запросу и на диск не сохраняется.</div>
 
   <section class="card">
     <h2>Загрузка изображений</h2>
+    <div class="toolbar compact">
+      <label class="field">Папка для загрузки <select id="uploadFolder"></select></label>
+      <button id="createFolderUpload">Создать папку</button>
+    </div>
     <div id="drop" class="drop" tabindex="0">
       <strong>Перетащите сюда одно или несколько изображений</strong>
       или нажмите для выбора файлов
@@ -77,14 +85,23 @@
   <section class="card">
     <h2>Тестовая библиотека</h2>
     <div class="toolbar">
+      <label class="field">Папка <select id="folderFilter"></select></label>
+      <button id="createFolder">Создать</button>
+      <button id="renameFolder">Переименовать</button>
+      <button id="deleteFolder" class="danger">Удалить папку</button>
+      <span id="folderStatus" class="muted"></span>
+    </div>
+    <div class="toolbar">
       <button id="selectAll">Выбрать все</button>
       <button id="selectNone">Снять выбор</button>
       <button id="run" class="primary">Запустить тест</button>
+      <label class="field">Переместить в <select id="moveFolder"></select></label>
+      <button id="move">Переместить выбранные</button>
       <button id="delete" class="danger">Удалить выбранные</button>
       <span id="libraryStatus" class="status"></span>
     </div>
     <div class="table-wrap"><table>
-      <thead><tr><th></th><th>Файл</th><th>Размер</th><th>Разрешение</th><th>Загружен</th></tr></thead>
+      <thead><tr><th></th><th>Файл</th><th>Папка</th><th>Размер</th><th>Разрешение</th><th>Загружен</th></tr></thead>
       <tbody id="libraryBody"></tbody>
     </table></div>
   </section>
@@ -96,8 +113,8 @@
     </div>
     <div id="resultStats" class="stats" hidden></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Файл</th><th>Layout</th><th>Формат / ошибка</th><th>Ориентация</th><th>Normalization</th><th>Время, ms</th><th>Действия</th></tr></thead>
-      <tbody id="resultBody"><tr><td colspan="7" class="empty">Тест ещё не запускался</td></tr></tbody>
+      <thead><tr><th>Файл</th><th>Папка</th><th>Layout</th><th>Формат / ошибка</th><th>Ориентация</th><th>Normalization</th><th>Время, ms</th><th>Действия</th></tr></thead>
+      <tbody id="resultBody"><tr><td colspan="8" class="empty">Тест ещё не запускался</td></tr></tbody>
     </table></div>
   </section>
 </main>
@@ -106,32 +123,45 @@
 <dialog id="cropDialog"><div class="modal-head"><strong id="cropTitle">Изображение</strong><button data-close="cropDialog">Закрыть</button></div><div class="modal-body"><img id="cropImage" alt="Изображение"></div></dialog>
 
 <script>
-const state={images:[],results:new Map(),lastRunAt:null};
+const ALL='__all__',UNGROUPED='__ungrouped__';
+const state={images:[],folders:[],results:new Map(),lastRunAt:null,currentFolder:ALL};
 const $=id=>document.getElementById(id);
 const escapeHtml=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmtBytes=n=>n<1024?`${n} B`:n<1024*1024?`${(n/1024).toFixed(1)} KB`:`${(n/1024/1024).toFixed(2)} MB`;
 const fmtDate=s=>{try{return new Date(s).toLocaleString('ru-RU')}catch{return s}};
 
 async function api(url,options={}){const response=await fetch(url,options);let payload=null;const type=response.headers.get('content-type')||'';if(type.includes('application/json'))payload=await response.json();if(!response.ok)throw new Error(payload?JSON.stringify(payload.detail??payload):`${response.status} ${response.statusText}`);return payload}
-async function loadImages(){ $('libraryStatus').textContent='Обновление списка…'; try{const data=await api('/v1/test-ui/images');state.images=data.images;renderLibrary();$('libraryStatus').textContent=`Файлов: ${data.count}`}catch(e){$('libraryStatus').textContent=`Ошибка: ${e.message}`} }
-function renderLibrary(){const body=$('libraryBody');if(!state.images.length){body.innerHTML='<tr><td colspan="5" class="empty">Нет загруженных изображений</td></tr>';return}body.innerHTML=state.images.map(item=>`<tr><td><input class="pick" type="checkbox" value="${item.id}"></td><td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td>${fmtBytes(item.bytes)}</td><td>${item.width_px}×${item.height_px}</td><td>${fmtDate(item.uploaded_at)}</td></tr>`).join('')}
+function folderById(id){return state.folders.find(item=>item.id===id)||null}
+function folderName(id){return id?(folderById(id)?.name||'Неизвестная папка'):'Без папки'}
+function folderOptions({includeAll=false,counts=false}={}){const items=[];if(includeAll)items.push(`<option value="${ALL}">Все изображения (${state.images.length})</option>`);const ungrouped=state.images.filter(item=>!item.folder_id||!folderById(item.folder_id)).length;items.push(`<option value="${UNGROUPED}">Без папки${counts?` (${ungrouped})`:''}</option>`);state.folders.forEach(folder=>items.push(`<option value="${folder.id}">${escapeHtml(folder.name)}${counts?` (${folder.count??state.images.filter(x=>x.folder_id===folder.id).length})`:''}</option>`));return items.join('')}
+function renderFolderSelectors(){const filter=$('folderFilter'),upload=$('uploadFolder'),move=$('moveFolder');const oldUpload=upload.value||UNGROUPED,oldMove=move.value||UNGROUPED;filter.innerHTML=folderOptions({includeAll:true,counts:true});if(![ALL,UNGROUPED,...state.folders.map(x=>x.id)].includes(state.currentFolder))state.currentFolder=ALL;filter.value=state.currentFolder;upload.innerHTML=folderOptions();move.innerHTML=folderOptions();upload.value=[UNGROUPED,...state.folders.map(x=>x.id)].includes(oldUpload)?oldUpload:UNGROUPED;move.value=[UNGROUPED,...state.folders.map(x=>x.id)].includes(oldMove)?oldMove:UNGROUPED;updateFolderButtons()}
+function updateFolderButtons(){const actual=state.currentFolder!==ALL&&state.currentFolder!==UNGROUPED;$('renameFolder').disabled=!actual;$('deleteFolder').disabled=!actual;const folder=actual?folderById(state.currentFolder):null;$('folderStatus').textContent=folder?`${folder.count??0} файл(ов)`:(state.currentFolder===UNGROUPED?'Файлы без папки':'')}
+function visibleImages(){if(state.currentFolder===ALL)return state.images;if(state.currentFolder===UNGROUPED)return state.images.filter(item=>!item.folder_id||!folderById(item.folder_id));return state.images.filter(item=>item.folder_id===state.currentFolder)}
+async function loadLibrary(){ $('libraryStatus').textContent='Обновление списка…';try{const [folderData,imageData]=await Promise.all([api('/v1/test-ui/folders'),api('/v1/test-ui/images')]);state.folders=folderData.folders;state.images=imageData.images;renderFolderSelectors();renderLibrary();const visible=visibleImages().length;$('libraryStatus').textContent=state.currentFolder===ALL?`Файлов: ${imageData.count}`:`Показано: ${visible} из ${imageData.count}`}catch(e){$('libraryStatus').textContent=`Ошибка: ${e.message}`}}
+function renderLibrary(){const body=$('libraryBody'),items=visibleImages();if(!items.length){body.innerHTML='<tr><td colspan="6" class="empty">В этой папке нет изображений</td></tr>';updateFolderButtons();return}body.innerHTML=items.map(item=>`<tr><td><input class="pick" type="checkbox" value="${item.id}"></td><td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td class="folder-name" title="${escapeHtml(folderName(item.folder_id))}">${escapeHtml(folderName(item.folder_id))}</td><td>${fmtBytes(item.bytes)}</td><td>${item.width_px}×${item.height_px}</td><td>${fmtDate(item.uploaded_at)}</td></tr>`).join('');updateFolderButtons()}
 function selectedIds(){return[...document.querySelectorAll('.pick:checked')].map(x=>x.value)}
-async function uploadFiles(files){if(!files.length)return;$('uploadStatus').textContent=`Загрузка: ${files.length} файл(ов)…`;const form=new FormData();[...files].forEach(file=>form.append('files',file,file.name));try{const data=await api('/v1/test-ui/images',{method:'POST',body:form});const lines=[];if(data.uploaded.length)lines.push(`Загружено: ${data.uploaded.length}`);data.errors.forEach(e=>lines.push(`${e.name}: ${e.error}`));$('uploadStatus').textContent=lines.join('\n');await loadImages()}catch(e){$('uploadStatus').textContent=`Ошибка загрузки: ${e.message}`}}
+function selectedFolderId(value){return value===UNGROUPED?null:value}
+async function createFolder(target='filter'){const name=prompt('Название новой тестовой папки:');if(name===null)return;try{const data=await api('/v1/test-ui/folders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});const id=data.folder.id;if(target==='filter')state.currentFolder=id;await loadLibrary();if(target==='upload')$('uploadFolder').value=id}catch(e){alert(`Ошибка создания папки: ${e.message}`)}}
+async function renameFolder(){const folder=folderById(state.currentFolder);if(!folder)return;const name=prompt('Новое название папки:',folder.name);if(name===null)return;try{await api(`/v1/test-ui/folders/${folder.id}/rename`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});await loadLibrary()}catch(e){alert(`Ошибка переименования: ${e.message}`)}}
+async function deleteFolder(){const folder=folderById(state.currentFolder);if(!folder)return;if(!confirm(`Удалить папку «${folder.name}»? Изображения не удалятся и будут перемещены в «Без папки».`))return;try{await api(`/v1/test-ui/folders/${folder.id}`,{method:'DELETE'});state.currentFolder=UNGROUPED;await loadLibrary()}catch(e){alert(`Ошибка удаления папки: ${e.message}`)}}
+async function moveSelected(){const ids=selectedIds();if(!ids.length){alert('Выберите хотя бы одно изображение');return}const target=$('moveFolder').value;try{await api('/v1/test-ui/images/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,folder_id:selectedFolderId(target)})});await loadLibrary()}catch(e){alert(`Ошибка перемещения: ${e.message}`)}}
+async function uploadFiles(files){if(!files.length)return;const target=$('uploadFolder').value;$('uploadStatus').textContent=`Загрузка: ${files.length} файл(ов) → ${folderName(selectedFolderId(target))}…`;const form=new FormData();[...files].forEach(file=>form.append('files',file,file.name));const folderId=selectedFolderId(target);if(folderId)form.append('folder_id',folderId);try{const data=await api('/v1/test-ui/images',{method:'POST',body:form});const lines=[];if(data.uploaded.length)lines.push(`Загружено: ${data.uploaded.length} → ${folderName(folderId)}`);data.errors.forEach(e=>lines.push(`${e.name}: ${e.error}`));$('uploadStatus').textContent=lines.join('\n');await loadLibrary()}catch(e){$('uploadStatus').textContent=`Ошибка загрузки: ${e.message}`}}
 function pill(value,kind=''){return`<span class="pill ${kind}">${escapeHtml(value??'—')}</span>`}
 function countBy(items,selector){const counts=new Map();items.forEach(item=>{const key=String(selector(item)??'—');counts.set(key,(counts.get(key)||0)+1)});return[...counts.entries()].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0],'ru'))}
 function percentile(values,fraction){if(!values.length)return null;const sorted=[...values].sort((a,b)=>a-b);return sorted[Math.max(0,Math.ceil(sorted.length*fraction)-1)]}
 function statCard(label,value,kind=''){return`<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value ${kind}">${escapeHtml(value)}</div></div>`}
 function statGroup(label,entries){const chips=entries.length?entries.map(([key,count])=>`<span class="stats-chip">${escapeHtml(key)}: <strong>${count}</strong></span>`).join(''):'<span class="muted">—</span>';return`<div class="stats-group"><strong>${escapeHtml(label)}</strong><div class="stats-chips">${chips}</div></div>`}
 function renderStats(items){const root=$('resultStats');if(!items.length){root.hidden=true;root.innerHTML='';return}const total=items.length,success=items.filter(x=>x.ok).length,errors=total-success,formatResolved=items.filter(x=>x.ok&&x.format).length,orientationResolved=items.filter(x=>x.ok&&x.orientation_status==='resolved').length;const timings=items.map(x=>x.total_ms).filter(x=>typeof x==='number'&&Number.isFinite(x));const avg=timings.length?timings.reduce((a,b)=>a+b,0)/timings.length:null,median=percentile(timings,.5),p95=percentile(timings,.95);const formats=countBy(items,x=>!x.ok?'ошибка':(x.format||'не определён')),orientations=countBy(items,x=>!x.ok?'ошибка':x.orientation_status==='resolved'?`${x.orientation_deg}°`:(x.orientation_status||'не определена')),layouts=countBy(items,x=>x.layout_status||'—'),normalizations=countBy(items,x=>x.normalization_status||(x.ok?'—':'ошибка'));root.innerHTML=`<div class="stats-grid">${statCard('Всего',total)}${statCard('Успешно',success,'ok')}${statCard('Ошибки',errors,errors?'err':'')}${statCard('Формат определён',`${formatResolved}/${total}`)}${statCard('Ориентация определена',`${orientationResolved}/${total}`)}${statCard('Среднее, ms',avg===null?'—':avg.toFixed(1))}${statCard('Median, ms',median===null?'—':median.toFixed(1))}${statCard('P95, ms',p95===null?'—':p95.toFixed(1))}</div><div class="stats-details">${statGroup('Форматы',formats)}${statGroup('Ориентация',orientations)}${statGroup('Layout',layouts)}${statGroup('Normalization',normalizations)}</div>`;root.hidden=false}
-function renderResults(items){const body=$('resultBody');state.results.clear();state.lastRunAt=new Date().toISOString();renderStats(items);$('exportDebug').disabled=!items.length;if(!items.length){body.innerHTML='<tr><td colspan="7" class="empty">Нет результатов</td></tr>';return}items.forEach(item=>state.results.set(item.id,item));body.innerHTML=items.map(item=>{const layoutKind=item.ok?(item.layout_status==='detected'?'ok':'warn'):'err';const formatText=item.ok?`${item.format??'не определён'}${item.format_status?` · ${item.format_status}`:''}`:(typeof item.error==='string'?item.error:JSON.stringify(item.error));const orientation=item.orientation_status==='resolved'?`${item.orientation_deg}°`:(item.orientation_status??'—');return`<tr><td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td>${pill(item.layout_status,layoutKind)}</td><td>${item.ok?escapeHtml(formatText):`<span class="pill err">${escapeHtml(formatText)}</span>`}</td><td>${escapeHtml(orientation)}</td><td>${escapeHtml(item.normalization_status??'—')}</td><td>${item.total_ms??'—'}</td><td><div class="actions"><button onclick="showOriginal('${item.id}')">Исходное</button><button onclick="showCrop('${item.id}')">Normalized crop</button><button onclick="showDebug('${item.id}')">Показать debug</button></div></td></tr>`}).join('')}
+function renderResults(items){const body=$('resultBody');state.results.clear();state.lastRunAt=new Date().toISOString();renderStats(items);$('exportDebug').disabled=!items.length;if(!items.length){body.innerHTML='<tr><td colspan="8" class="empty">Нет результатов</td></tr>';return}items.forEach(item=>state.results.set(item.id,item));body.innerHTML=items.map(item=>{const layoutKind=item.ok?(item.layout_status==='detected'?'ok':'warn'):'err';const formatText=item.ok?`${item.format??'не определён'}${item.format_status?` · ${item.format_status}`:''}`:(typeof item.error==='string'?item.error:JSON.stringify(item.error));const orientation=item.orientation_status==='resolved'?`${item.orientation_deg}°`:(item.orientation_status??'—');const folder=item.folder_name||'Без папки';return`<tr><td class="name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td><td class="folder-name" title="${escapeHtml(folder)}">${escapeHtml(folder)}</td><td>${pill(item.layout_status,layoutKind)}</td><td>${item.ok?escapeHtml(formatText):`<span class="pill err">${escapeHtml(formatText)}</span>`}</td><td>${escapeHtml(orientation)}</td><td>${escapeHtml(item.normalization_status??'—')}</td><td>${item.total_ms??'—'}</td><td><div class="actions"><button onclick="showOriginal('${item.id}')">Исходное</button><button onclick="showCrop('${item.id}')">Normalized crop</button><button onclick="showDebug('${item.id}')">Показать debug</button></div></td></tr>`}).join('')}
 function highlightedJson(value,depth=0){const pad='  '.repeat(depth),childPad='  '.repeat(depth+1);if(value===null)return'<span class="json-null">null</span>';if(typeof value==='string')return`<span class="json-string">${escapeHtml(JSON.stringify(value))}</span>`;if(typeof value==='number')return`<span class="json-number">${escapeHtml(String(value))}</span>`;if(typeof value==='boolean')return`<span class="json-boolean">${value}</span>`;if(Array.isArray(value)){if(!value.length)return'[]';return`[\n${value.map(item=>`${childPad}${highlightedJson(item,depth+1)}`).join(',\n')}\n${pad}]`}if(typeof value==='object'){const entries=Object.entries(value);if(!entries.length)return'{}';return`{\n${entries.map(([key,item])=>`${childPad}<span class="json-key">${escapeHtml(JSON.stringify(key))}</span>: ${highlightedJson(item,depth+1)}`).join(',\n')}\n${pad}}`}return`<span class="json-null">${escapeHtml(String(value))}</span>`}
 async function runSelected(){const ids=selectedIds();if(!ids.length){alert('Выберите хотя бы одно изображение');return}const btn=$('run');btn.disabled=true;btn.textContent=`Обработка ${ids.length}…`;try{const data=await api('/v1/test-ui/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});renderResults(data.results)}catch(e){alert(`Ошибка запуска теста: ${e.message}`)}finally{btn.disabled=false;btn.textContent='Запустить тест'}}
-async function deleteSelected(){const ids=selectedIds();if(!ids.length){alert('Выберите хотя бы одно изображение');return}if(!confirm(`Удалить выбранные изображения (${ids.length}) из постоянного volume?`))return;try{await api('/v1/test-ui/images/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});await loadImages()}catch(e){alert(`Ошибка удаления: ${e.message}`)}}
-function exportDebugJson(){const items=[...state.results.values()];if(!items.length)return;const payload={schema:'toolocr.test-ui.debug-export.v1',exported_at:new Date().toISOString(),test_started_at:state.lastRunAt,count:items.length,results:items.map(item=>({id:item.id,filename:item.name,ok:item.ok,layout_status:item.layout_status,format:item.format,format_status:item.format_status,orientation_status:item.orientation_status,orientation_deg:item.orientation_deg,normalization_status:item.normalization_status,total_ms:item.total_ms,error:item.error??null,debug:item.debug}))};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');const stamp=new Date().toISOString().replace(/[:.]/g,'-');link.href=url;link.download=`toolocr-debug-${stamp}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+async function deleteSelected(){const ids=selectedIds();if(!ids.length){alert('Выберите хотя бы одно изображение');return}if(!confirm(`Удалить выбранные изображения (${ids.length}) из постоянного volume?`))return;try{await api('/v1/test-ui/images/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});await loadLibrary()}catch(e){alert(`Ошибка удаления: ${e.message}`)}}
+function exportDebugJson(){const items=[...state.results.values()];if(!items.length)return;const payload={schema:'toolocr.test-ui.debug-export.v1',exported_at:new Date().toISOString(),test_started_at:state.lastRunAt,count:items.length,results:items.map(item=>({id:item.id,filename:item.name,folder_id:item.folder_id??null,folder_name:item.folder_name??null,ok:item.ok,layout_status:item.layout_status,format:item.format,format_status:item.format_status,orientation_status:item.orientation_status,orientation_deg:item.orientation_deg,normalization_status:item.normalization_status,total_ms:item.total_ms,error:item.error??null,debug:item.debug}))};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');const stamp=new Date().toISOString().replace(/[:.]/g,'-');link.href=url;link.download=`toolocr-debug-${stamp}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 window.showDebug=id=>{const item=state.results.get(id);if(!item)return;$('debugTitle').textContent=`Debug JSON — ${item.name}`;$('debugPre').innerHTML=highlightedJson(item.debug);$('debugDialog').showModal()};
 window.showOriginal=id=>{const item=state.results.get(id);if(!item)return;$('cropTitle').textContent=`Исходное изображение — ${item.name}`;$('cropImage').alt=`Исходное изображение — ${item.name}`;$('cropImage').src=`/v1/test-ui/images/${id}/original?t=${Date.now()}`;$('cropDialog').showModal()};
 window.showCrop=id=>{const item=state.results.get(id);if(!item)return;$('cropTitle').textContent=`Normalized crop — ${item.name}`;$('cropImage').alt=`Normalized crop — ${item.name}`;$('cropImage').src=`/v1/test-ui/images/${id}/normalized?t=${Date.now()}`;$('cropDialog').showModal()};
-const drop=$('drop'),input=$('fileInput');drop.addEventListener('click',()=>input.click());drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')input.click()});input.addEventListener('change',()=>{uploadFiles(input.files);input.value=''});['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>uploadFiles(e.dataTransfer.files));$('selectAll').onclick=()=>document.querySelectorAll('.pick').forEach(x=>x.checked=true);$('selectNone').onclick=()=>document.querySelectorAll('.pick').forEach(x=>x.checked=false);$('run').onclick=runSelected;$('delete').onclick=deleteSelected;$('exportDebug').onclick=exportDebugJson;document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>$(btn.dataset.close).close());$('cropDialog').addEventListener('close',()=>$('cropImage').removeAttribute('src'));loadImages();
+const drop=$('drop'),input=$('fileInput');drop.addEventListener('click',()=>input.click());drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')input.click()});input.addEventListener('change',()=>{uploadFiles(input.files);input.value=''});['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>uploadFiles(e.dataTransfer.files));
+$('folderFilter').onchange=()=>{state.currentFolder=$('folderFilter').value;if(state.currentFolder!==ALL)$('uploadFolder').value=state.currentFolder;renderLibrary();$('libraryStatus').textContent=`Показано: ${visibleImages().length} из ${state.images.length}`};$('createFolder').onclick=()=>createFolder('filter');$('createFolderUpload').onclick=()=>createFolder('upload');$('renameFolder').onclick=renameFolder;$('deleteFolder').onclick=deleteFolder;$('move').onclick=moveSelected;$('selectAll').onclick=()=>document.querySelectorAll('.pick').forEach(x=>x.checked=true);$('selectNone').onclick=()=>document.querySelectorAll('.pick').forEach(x=>x.checked=false);$('run').onclick=runSelected;$('delete').onclick=deleteSelected;$('exportDebug').onclick=exportDebugJson;document.querySelectorAll('[data-close]').forEach(btn=>btn.onclick=()=>$(btn.dataset.close).close());$('cropDialog').addEventListener('close',()=>$('cropImage').removeAttribute('src'));loadLibrary();
 </script>
 </body>
 </html>
