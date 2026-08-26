@@ -100,7 +100,7 @@ def test_session_blocks_strong_aspect_mismatch():
     assert decision.validation["reasons"]
 
 
-def test_session_blocks_metric_contradiction_even_when_aspect_is_similar():
+def test_session_metric_contradiction_is_warning_while_fov_is_unstable():
     decision = decide_format(
         format_mode=FormatMode.SESSION,
         expected_format=EnvelopeFormat.C5,
@@ -112,9 +112,11 @@ def test_session_blocks_metric_contradiction_even_when_aspect_is_similar():
         partial_frame=False,
     )
 
-    assert decision.format is None
-    assert decision.status == "session_mismatch"
+    assert decision.format is EnvelopeFormat.C5
+    assert decision.status == "session_confirmed"
     assert decision.validation["metric_observed_format"] == "C6"
+    assert decision.validation["blocking"] is False
+    assert decision.validation["warnings"]
 
 
 def test_fixed_keeps_expected_format_and_reports_warnings():
