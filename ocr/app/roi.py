@@ -58,8 +58,12 @@ class RoiDetection:
 
 # Это расширенные поисковые зоны, а не нормативные границы адресных зон.
 # Они получены из компоновки обязательного приложения А ГОСТ Р 51506-99
-# и намеренно содержат запас для реального рукописного текста. На первом
-# этапе поддерживаются основные production-форматы простых писем: DL и C5.
+# и намеренно содержат запас для реального рукописного текста.
+#
+# C4 добавлен как отдельный профиль: на реальных бланках этого формата
+# адрес получателя расположен в правой нижней части лицевой стороны, а
+# шестизначный кодовый штамп — в нижней левой части. Координаты первой
+# итерации специально широкие и подлежат уточнению по production-корпусу.
 _GOST_GUIDED_SEARCH_ZONES: dict[EnvelopeFormat, dict[str, RectNormalized]] = {
     EnvelopeFormat.DL: {
         "recipient_address": RectNormalized(0.50, 0.27, 0.47, 0.50),
@@ -68,6 +72,10 @@ _GOST_GUIDED_SEARCH_ZONES: dict[EnvelopeFormat, dict[str, RectNormalized]] = {
     EnvelopeFormat.C5: {
         "recipient_address": RectNormalized(0.50, 0.28, 0.47, 0.48),
         "recipient_postcode": RectNormalized(0.05, 0.68, 0.47, 0.29),
+    },
+    EnvelopeFormat.C4: {
+        "recipient_address": RectNormalized(0.49, 0.30, 0.48, 0.48),
+        "recipient_postcode": RectNormalized(0.05, 0.68, 0.45, 0.29),
     },
 }
 
