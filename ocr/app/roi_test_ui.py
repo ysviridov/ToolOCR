@@ -16,6 +16,7 @@ from .test_ui import _decode_image, _image_path, _load_metadata, _validate_file_
 
 
 router = APIRouter(tags=["test-ui"])
+SUPPORTED_ROI_FORMATS = (EnvelopeFormat.DL, EnvelopeFormat.C5, EnvelopeFormat.C4)
 
 
 async def _analyze_saved_image(
@@ -146,8 +147,8 @@ async def roi_preview(
             detail={
                 "reason": "roi_format_unsupported",
                 "format": envelope_format.value,
-                "supported_formats": [EnvelopeFormat.DL.value, EnvelopeFormat.C5.value],
-                "message": "На первом этапе ROI простых писем поддерживает DL и C5",
+                "supported_formats": [item.value for item in SUPPORTED_ROI_FORMATS],
+                "message": "ROI простых писем поддерживает DL, C5 и C4",
             },
         )
 
