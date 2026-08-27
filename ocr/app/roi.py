@@ -58,8 +58,6 @@ class RoiDetection:
     source_reference: str
 
 
-# Расширенные поисковые зоны адреса. Это не нормативные границы ГОСТ:
-# внутри них CV уточняет фактический bbox рукописного/печатного текста.
 _GOST_GUIDED_SEARCH_ZONES: dict[EnvelopeFormat, dict[str, RectNormalized]] = {
     EnvelopeFormat.DL: {
         "recipient_address": RectNormalized(0.50, 0.27, 0.47, 0.50),
@@ -72,11 +70,19 @@ _GOST_GUIDED_SEARCH_ZONES: dict[EnvelopeFormat, dict[str, RectNormalized]] = {
     },
 }
 
-# Трафаретный шестизначный индекс — отдельный технический объект. Он
-# расположен в левом нижнем секторе и имеет одинаковую структуру для
-# поддерживаемых форматов: стартовый знак '=' + шесть ячеек цифр. Поэтому
-# postcode больше не привязывается к приблизительному format-specific bbox.
+# Трафаретный индекс — одинаковый технический объект для поддерживаемых
+# форматов: стартовый знак '=' + шесть индивидуальных ячеек цифр.
 _POSTCODE_STENCIL_SEARCH_ZONE = RectNormalized(0.0, 0.50, 0.62, 0.50)
+
+# Strict path остаётся основным. Seven-bar rescue разрешает слабый нижний
+# штрих '=' только при практически идеальной геометрии всей верхней строки.
+_STENCIL_STRICT_SCORE_MIN = 0.78
+_STENCIL_START_MARKER_MIN = 0.40
+_STENCIL_RESCUE_BAR_COUNT = 7
+_STENCIL_RESCUE_WIDTH_CV_MAX = 0.12
+_STENCIL_RESCUE_SPACING_ERROR_MAX = 0.08
+_STENCIL_RESCUE_ALIGNMENT_ERROR_MAX = 0.55
+_STENCIL_RESCUE_ROW_Y_NORM_MIN = 0.70
 
 ROI_COLORS_BGR: dict[str, tuple[int, int, int]] = {
     "recipient_address": (70, 175, 70),
@@ -225,24 +231,62 @@ def _normalize_stencil_gray(gray: np.ndarray) -> np.ndarray:
     return np.clip(corrected, 0, 255).astype(np.uint8)
 
 
+def _confirmation_mode(candidate: dict[str, Any]) -> str | None:
+    strict = (
+        candidate["score"] >= _STENCIL_STRICT_SCORE_MIN
+        and candidate["start_marker_score"] >= _STENCIL_START_MARKER_MIN
+    )
+    if strict:
+        return "strict_start_marker"
+
+    rescue = (
+        candidate["bar_count"] == _STENCIL_RESCUE_BAR_COUNT
+        and candidate["width_cv"] <= _STENCIL_RESCUE_WIDTH_CV_MAX
+        and candidate["spacing_error"] <= _STENCIL_RESCUE_SPACING_ERROR_MAX
+        and candidate["alignment_error"] <= _STENCIL_RESCUE_ALIGNMENT_ERROR_MAX
+        and candidate["row_y_norm"] >= _STENCIL_RESCUE_ROW_Y_NORM_MIN
+    )
+    if rescue:
+        return "seven_bar_rescue"
+    return None
+
+
+def _rejection_reason(candidate: dict[str, Any] | None) -> str:
+    if candidate is None:
+        return "no_structural_candidate"
+    if candidate["bar_count"] < 7:
+        return "insufficient_top_bars"
+    if candidate["row_y_norm"] < _STENCIL_RESCUE_ROW_Y_NORM_MIN:
+        return "row_not_low_enough"
+    if candidate["width_cv"] > _STENCIL_RESCUE_WIDTH_CV_MAX:
+        return "width_variation_too_high"
+    if candidate["spacing_error"] > _STENCIL_RESCUE_SPACING_ERROR_MAX:
+        return "spacing_error_too_high"
+    if candidate["alignment_error"] > _STENCIL_RESCUE_ALIGNMENT_ERROR_MAX:
+        return "alignment_error_too_high"
+    if candidate["start_marker_score"] < _STENCIL_START_MARKER_MIN:
+        return "start_marker_weak"
+    return "structural_score_too_low"
+
+
 def _postcode_stencil_bbox(
     image: np.ndarray,
     search: PixelRect,
 ) -> tuple[PixelRect | None, int, float, float, dict[str, Any]]:
-    """Ищет технический блок '= + 6 цифр' по геометрии верхних плашек.
+    """Ищет '= + 6 цифр' по геометрии верхних плашек и стартового '='.
 
-    Основной инвариант:
-    - семь почти одинаковых широких чёрных прямоугольников в одной линии;
-    - регулярный шаг между ними;
-    - под первым прямоугольником расположен второй, примерно вдвое тоньше.
-
-    Это позволяет отличать postcode от рукописи, штрихкода и декоративной
-    печати без OCR и без точной привязки к абсолютному format-specific ROI.
+    Основная ветка требует нижнюю половинную плашку стартового '='. Rescue
+    допускается без неё только для полной строки из семи практически
+    одинаковых и регулярно расположенных верхних плашек в нижней части
+    canonical-письма.
     """
 
     crop = image[search.y:search.y2, search.x:search.x2]
     if crop.size == 0:
-        return None, 0, 0.0, 0.0, {"reason": "empty_search_zone"}
+        return None, 0, 0.0, 0.0, {
+            "confirmation_mode": "none",
+            "rejection_reason": "empty_search_zone",
+        }
 
     full_height, full_width = image.shape[:2]
     crop_height, crop_width = crop.shape[:2]
@@ -300,7 +344,7 @@ def _postcode_stencil_bbox(
         and item[4] >= 0.70
     ]
 
-    best: dict[str, Any] | None = None
+    structural: list[dict[str, Any]] = []
     for first_index, first in enumerate(top_bars):
         first_center = first[0] + first[2] / 2.0
         for second_index, second in enumerate(top_bars):
@@ -344,16 +388,25 @@ def _postcode_stencil_bbox(
             heights = np.asarray([item[3] for item in valid], dtype=np.float32)
             centers_x = np.asarray([item[0] + item[2] / 2.0 for item in valid], dtype=np.float32)
             centers_y = np.asarray([item[1] + item[3] / 2.0 for item in valid], dtype=np.float32)
-            positions = np.asarray([index for index, item in enumerate(matched) if item is not None], dtype=np.float32)
+            positions = np.asarray(
+                [index for index, item in enumerate(matched) if item is not None],
+                dtype=np.float32,
+            )
 
             expected_x = first_center + positions * step
-            spacing_error = float(np.sqrt(np.mean(np.square(centers_x - expected_x))) / max(step, 1.0))
+            spacing_error = float(
+                np.sqrt(np.mean(np.square(centers_x - expected_x))) / max(step, 1.0)
+            )
             width_cv = float(np.std(widths) / max(float(np.mean(widths)), 1.0))
 
             line = np.polyfit(centers_x, centers_y, 1)
             alignment_error = float(
                 np.sqrt(np.mean(np.square(centers_y - np.polyval(line, centers_x))))
                 / max(float(np.median(heights)), 1.0)
+            )
+            row_center_y_work = float(np.median(centers_y))
+            row_y_norm = float(
+                (search.y * scale + row_center_y_work) / max(scaled_full_height, 1.0)
             )
 
             start_bar = matched[0]
@@ -364,7 +417,11 @@ def _postcode_stencil_bbox(
                         continue
                     same_x = abs(candidate[0] - start_bar[0]) <= 0.25 * start_bar[2]
                     same_width = abs(candidate[2] - start_bar[2]) <= 0.30 * start_bar[2]
-                    below = start_bar[1] + 0.8 * start_bar[3] <= candidate[1] <= start_bar[1] + 2.5 * start_bar[3]
+                    below = (
+                        start_bar[1] + 0.8 * start_bar[3]
+                        <= candidate[1]
+                        <= start_bar[1] + 2.5 * start_bar[3]
+                    )
                     half_height = 0.30 * start_bar[3] <= candidate[3] <= 0.80 * start_bar[3]
                     if same_x and same_width and below and half_height:
                         start_marker_score = max(
@@ -380,32 +437,60 @@ def _postcode_stencil_bbox(
                 + start_marker_score * 0.15
             )
 
-            candidate_result = {
-                "score": float(score),
-                "matched": matched,
-                "bar_count": len(valid),
-                "start_marker_score": float(start_marker_score),
-                "width_cv": width_cv,
-                "spacing_error": spacing_error,
-                "alignment_error": alignment_error,
-                "bar_step_px_work": float(step),
-                "bar_width_px_work": float(np.median(widths)),
-            }
-            if best is None or candidate_result["score"] > best["score"]:
-                best = candidate_result
+            structural.append(
+                {
+                    "score": float(score),
+                    "matched": matched,
+                    "bar_count": len(valid),
+                    "start_marker_score": float(start_marker_score),
+                    "width_cv": width_cv,
+                    "spacing_error": spacing_error,
+                    "alignment_error": alignment_error,
+                    "row_y_norm": row_y_norm,
+                    "bar_step_px_work": float(step),
+                    "bar_width_px_work": float(np.median(widths)),
+                }
+            )
 
-    if best is None or best["score"] < 0.78 or best["start_marker_score"] < 0.40:
+    strict_candidates = [
+        item for item in structural if _confirmation_mode(item) == "strict_start_marker"
+    ]
+    rescue_candidates = [
+        item for item in structural if _confirmation_mode(item) == "seven_bar_rescue"
+    ]
+
+    if strict_candidates:
+        best = max(strict_candidates, key=lambda item: item["score"])
+        confirmation_mode = "strict_start_marker"
+    elif rescue_candidates:
+        # В rescue приоритет геометрии, а не слабому случайному start-marker.
+        best = min(
+            rescue_candidates,
+            key=lambda item: (
+                item["width_cv"] + item["spacing_error"] + item["alignment_error"],
+                -item["score"],
+            ),
+        )
+        confirmation_mode = "seven_bar_rescue"
+    else:
+        best_failed = max(structural, key=lambda item: item["score"], default=None)
         return (
             None,
-            0 if best is None else int(best["bar_count"]),
+            0 if best_failed is None else int(best_failed["bar_count"]),
             0.0,
-            0.0 if best is None else round(float(best["score"]), 4),
+            0.0 if best_failed is None else round(float(best_failed["score"]), 4),
             {
-                "reason": "stencil_pattern_not_confirmed",
+                "confirmation_mode": "none",
+                "rejection_reason": _rejection_reason(best_failed),
                 "candidate_count": len(candidates),
                 "top_bar_candidate_count": len(top_bars),
-                "best_score": None if best is None else round(float(best["score"]), 4),
-                "start_marker_score": None if best is None else round(float(best["start_marker_score"]), 4),
+                "best_score": None if best_failed is None else round(float(best_failed["score"]), 4),
+                "bar_count": None if best_failed is None else int(best_failed["bar_count"]),
+                "start_marker_score": None if best_failed is None else round(float(best_failed["start_marker_score"]), 4),
+                "width_cv": None if best_failed is None else round(float(best_failed["width_cv"]), 4),
+                "spacing_error": None if best_failed is None else round(float(best_failed["spacing_error"]), 4),
+                "alignment_error": None if best_failed is None else round(float(best_failed["alignment_error"]), 4),
+                "row_y_norm": None if best_failed is None else round(float(best_failed["row_y_norm"]), 4),
                 "threshold": round(dark_threshold, 2),
             },
         )
@@ -413,7 +498,10 @@ def _postcode_stencil_bbox(
     matched_valid = [item for item in best["matched"] if item is not None]
     bar_width = float(np.median([item[2] for item in matched_valid]))
     local_x1 = max(0, int(round(min(item[0] for item in matched_valid) - 0.15 * bar_width)))
-    local_x2 = min(work_width, int(round(max(item[0] + item[2] for item in matched_valid) + 0.15 * bar_width)))
+    local_x2 = min(
+        work_width,
+        int(round(max(item[0] + item[2] for item in matched_valid) + 0.15 * bar_width)),
+    )
     local_y1 = max(0, int(round(min(item[1] for item in matched_valid) - 0.12 * bar_width)))
     top_bar_bottom = max(item[1] + item[3] for item in matched_valid)
     local_y2 = min(work_height, int(round(top_bar_bottom + 2.45 * bar_width)))
@@ -427,11 +515,18 @@ def _postcode_stencil_bbox(
     )
     detected = _clip_rect(detected, full_width, full_height)
 
-    scaled_local = PixelRect(local_x1, local_y1, max(1, local_x2 - local_x1), max(1, local_y2 - local_y1))
+    scaled_local = PixelRect(
+        local_x1,
+        local_y1,
+        max(1, local_x2 - local_x1),
+        max(1, local_y2 - local_y1),
+    )
     stencil_crop = binary[scaled_local.y:scaled_local.y2, scaled_local.x:scaled_local.x2]
     ink_density = float(np.mean(stencil_crop > 0)) if stencil_crop.size else 0.0
 
     features = {
+        "confirmation_mode": confirmation_mode,
+        "rejection_reason": None,
         "bar_count": int(best["bar_count"]),
         "expected_bar_count": 7,
         "digit_count": 6,
@@ -439,16 +534,31 @@ def _postcode_stencil_bbox(
         "width_cv": round(float(best["width_cv"]), 4),
         "spacing_error": round(float(best["spacing_error"]), 4),
         "alignment_error": round(float(best["alignment_error"]), 4),
+        "row_y_norm": round(float(best["row_y_norm"]), 4),
         "bar_width_px": round(float(best["bar_width_px_work"] * inverse_scale), 2),
         "bar_step_px": round(float(best["bar_step_px_work"] * inverse_scale), 2),
         "threshold": round(dark_threshold, 2),
         "detector_scale": round(scale, 4),
+        "rescue_limits": {
+            "bar_count": _STENCIL_RESCUE_BAR_COUNT,
+            "width_cv_max": _STENCIL_RESCUE_WIDTH_CV_MAX,
+            "spacing_error_max": _STENCIL_RESCUE_SPACING_ERROR_MAX,
+            "alignment_error_max": _STENCIL_RESCUE_ALIGNMENT_ERROR_MAX,
+            "row_y_norm_min": _STENCIL_RESCUE_ROW_Y_NORM_MIN,
+        },
     }
+
+    confidence = float(best["score"])
+    if confirmation_mode == "seven_bar_rescue":
+        # Rescue никогда не получает чрезмерно высокий confidence только из-за
+        # отсутствующего start-marker, но остаётся выше detection threshold.
+        confidence = max(0.78, min(0.94, confidence))
+
     return (
         detected,
         int(best["bar_count"]),
         round(ink_density, 6),
-        round(min(0.99, float(best["score"])), 4),
+        round(min(0.99, confidence), 4),
         features,
     )
 
@@ -514,9 +624,6 @@ def detect_simple_mail_rois(image: np.ndarray, envelope_format: EnvelopeFormat) 
         postcode_final = postcode_bbox
         detected_count += 1
     else:
-        # Generic foreground fallback намеренно не используется: если
-        # структурный шаблон не подтверждён, лучше показать search zone и
-        # оставить false negative, чем уверенно вернуть чужой текст/рисунок.
         postcode_status = "stencil_not_found"
         postcode_final = postcode_search
         confidence = min(0.25, confidence)
@@ -627,7 +734,10 @@ def draw_roi_overlay(image: np.ndarray, result: RoiDetection) -> np.ndarray:
             )
 
         detector_suffix = " STENCIL" if region.detector == "postcode_stencil" else ""
-        label = f"{ROI_LABELS[region.kind]}{detector_suffix} {region.confidence:.2f}"
+        mode_suffix = ""
+        if region.features and region.features.get("confirmation_mode") == "seven_bar_rescue":
+            mode_suffix = " RESCUE"
+        label = f"{ROI_LABELS[region.kind]}{detector_suffix}{mode_suffix} {region.confidence:.2f}"
         anchor = region.detected_bbox or region.search_bbox
         text_y = max(22, anchor.y - max(7, round(7 * scale)))
         cv2.putText(
