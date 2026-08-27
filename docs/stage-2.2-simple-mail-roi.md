@@ -31,12 +31,6 @@ ROI всегда живут в системе координат `canonical_rect
 
 Orientation считается зафиксированной подсистемой. Настройка ROI не должна менять orientation weights, thresholds или photometric preprocessing.
 
-## Canonicalization
-
-Модуль `ocr/app/roi.py` содержит `canonicalize_rectified()`.
-
-Если orientation имеет статус `resolved` и значение `180`, rectified-изображение поворачивается на 180 градусов. При `ambiguous` изображение не поворачивается наугад, а `reliable=false`; ROI preview для такого кадра возвращает ошибку.
-
 ## ROI текущей итерации
 
 ### `recipient_address`
@@ -58,8 +52,8 @@ Orientation считается зафиксированной подсистем
 - семь верхних чёрных прямоугольных плашек: одна над стартовым знаком `=` и шесть над цифрами;
 - плашки имеют близкую ширину и высоту;
 - шаг между ними почти регулярный;
-- центры плашек лежат почти на одной прямой, допускается небольшой остаточный наклон после rectification;
-- под первой верхней плашкой находится вторая плашка той же ширины, приблизительно вдвое тоньше;
+- центры плашек лежат почти на одной прямой;
+- под первой верхней плашкой штатно находится вторая плашка той же ширины, приблизительно вдвое тоньше;
 - число цифр фиксировано: шесть.
 
 Этот pattern не зависит от формата конверта и устойчивее к рукописи, штрихкодам, печатным адресам и декоративным изображениям.
@@ -74,7 +68,7 @@ x=0.00 y=0.50 w=0.62 h=0.50
 
 Это только зона поиска anchor-pattern, а не итоговый ROI.
 
-Перед выделением плашек выполняется локальная компенсация медленного перепада освещения. Затем горизонтальная morphology выделяет широкие чёрные элементы. Кандидаты группируются в последовательность из семи позиций и оцениваются по:
+Перед выделением плашек выполняется локальная компенсация медленного перепада освещения. Затем horizontal morphology выделяет широкие чёрные элементы. Кандидаты группируются в последовательность из семи позиций и оцениваются по:
 
 ```text
 bar_count
@@ -82,40 +76,83 @@ start_marker_score
 width_cv
 spacing_error
 alignment_error
+row_y_norm
 ```
 
-Подтверждённый stencil возвращается как:
+### Strict confirmation
+
+Основной путь остаётся прежним:
+
+```text
+structural score >= 0.78
+start_marker_score >= 0.40
+-> confirmation_mode = strict_start_marker
+```
+
+То есть штатно detector требует подтверждение нижней половинной плашки стартового `=`.
+
+### Seven-bar rescue
+
+На реальных C4 нижняя плашка `=` иногда печатается/снимается хуже верхней строки. Чтобы не терять такой настоящий индекс, добавлен второй независимый путь. Он не ослабляет strict-порог и применяется только при полной и очень регулярной верхней строке:
+
+```text
+bar_count == 7
+width_cv <= 0.12
+spacing_error <= 0.08
+alignment_error <= 0.55
+row_y_norm >= 0.70
+-> confirmation_mode = seven_bar_rescue
+```
+
+Шесть плашек rescue не активируют. Строка выше 70% высоты canonical-письма также не может пройти rescue. Поэтому отсутствие нижней плашки `=` компенсируется одновременно четырьмя сильными структурными ограничениями и геометрическим положением блока.
+
+Strict-кандидат всегда имеет приоритет над rescue-кандидатом.
+
+## Debug metadata
+
+Подтверждённый stencil возвращает, например:
 
 ```json
 {
   "kind": "recipient_postcode",
   "status": "stencil_detected",
   "detector": "postcode_stencil",
-  "confidence": 0.96,
+  "confidence": 0.86,
   "features": {
+    "confirmation_mode": "seven_bar_rescue",
+    "rejection_reason": null,
     "bar_count": 7,
     "expected_bar_count": 7,
     "digit_count": 6,
-    "start_marker_score": 0.95,
-    "width_cv": 0.02,
-    "spacing_error": 0.03,
-    "alignment_error": 0.04,
+    "start_marker_score": 0.12,
+    "width_cv": 0.03,
+    "spacing_error": 0.02,
+    "alignment_error": 0.08,
+    "row_y_norm": 0.91,
     "bar_width_px": 78.0,
     "bar_step_px": 98.0
   }
 }
 ```
 
-Итоговый `detected_bbox` строится от найденной последовательности плашек и включает шесть трафаретных цифр под ними.
+Для strict-path `confirmation_mode=strict_start_marker`.
 
-Если pattern не подтверждён, generic foreground fallback намеренно не используется. Регион получает:
+Если pattern не подтверждён, generic foreground fallback намеренно не используется. Регион получает `status=stencil_not_found`, `detected_bbox=null`, а `features` содержит:
 
 ```text
-status = stencil_not_found
-detected_bbox = null
+confirmation_mode = none
+rejection_reason =
+  no_structural_candidate |
+  insufficient_top_bars |
+  row_not_low_enough |
+  width_variation_too_high |
+  spacing_error_too_high |
+  alignment_error_too_high |
+  start_marker_weak |
+  structural_score_too_low
 ```
 
-Это сделано специально: для postcode false negative безопаснее, чем уверенный bbox на чужом адресе, штрихкоде или иллюстрации.
+Это позволяет разбирать оставшиеся false negative без изменения orientation или общего foreground detector.
 
 ## ГОСТ
 
@@ -135,7 +172,7 @@ Format-specific search zones продолжают использоваться �
 - зелёный — `recipient_address`;
 - оранжевый — `recipient_postcode`.
 
-Для postcode подпись выглядит как `POSTCODE STENCIL <confidence>`.
+Strict detection подписывается как `POSTCODE STENCIL <confidence>`, rescue — как `POSTCODE STENCIL RESCUE <confidence>`.
 
 Пунктирная оранжевая рамка показывает широкий сектор поиска, толстая сплошная — фактически найденный трафаретный блок. Preview генерируется по запросу и на диск не сохраняется.
 
@@ -156,6 +193,6 @@ GET /v1/test-ui/images/{id}/roi/meta
 - распознавание текста адреса ещё не выполняется;
 - штрихкоды заказных отправлений не декодируются;
 - при `orientation=ambiguous` ROI не строятся;
-- stencil detector нужно провалидировать на полном 50-файловом C4-корпусе и затем отдельно на DL/C5.
+- seven-bar rescue нужно проверить сначала на известных C4 false negative, затем на полном 50-файловом C4-корпусе и отдельно на DL/C5.
 
-После corpus-validation следует анализировать отдельно false negative (`stencil_not_found`) и false positive. Для успешных детекций проверяется tightness bbox относительно семи плашек и шести цифр. Orientation при этом не меняется.
+После corpus-validation отдельно анализируются false negative (`stencil_not_found`) и false positive. Для успешных детекций проверяется tightness bbox относительно семи плашек и шести цифр. Orientation при этом не меняется.
