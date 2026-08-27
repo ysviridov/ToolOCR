@@ -96,6 +96,7 @@ def test_dl_simple_mail_roi_detects_postcode_stencil_strict():
     assert postcode.features["digit_count"] == 6
     assert postcode.features["start_marker_score"] >= 0.4
     assert postcode.features["confirmation_mode"] == "strict_start_marker"
+    assert postcode.features["association_mode"] == "row_first"
     assert postcode.features["rejection_reason"] is None
 
 
@@ -116,6 +117,42 @@ def test_c4_postcode_stencil_is_found_close_to_left_and_bottom_edges():
     assert postcode.features is not None
     assert postcode.features["bar_count"] == 7
     assert postcode.features["row_y_norm"] >= 0.70
+    assert postcode.features["association_mode"] == "row_first"
+
+
+def test_row_first_association_ignores_same_x_horizontal_distractors():
+    image = np.full((900, 1300, 3), 225, dtype=np.uint8)
+    x = 42
+    y = 760
+    bar_width = 42
+    step = round(bar_width * 1.25)
+    bar_height = max(8, round(bar_width * 0.28))
+
+    _draw_postcode_stencil(image, x=x, y=y, bar_width=bar_width)
+
+    # Эти элементы имеют те же X, что настоящие верхние плашки, но находятся
+    # ниже. Старый X-first greedy matching мог подхватить их и получить
+    # alignment_error_too_high. Row-first обязан оставить их в другом Y-row.
+    for position in (0, 3, 5):
+        bx = x + position * step
+        cv2.rectangle(
+            image,
+            (bx, y + 58),
+            (bx + bar_width, y + 58 + bar_height),
+            (0, 0, 0),
+            -1,
+        )
+
+    postcode = _postcode_region(image, EnvelopeFormat.C5)
+
+    assert postcode.status == "stencil_detected"
+    assert postcode.detected_bbox is not None
+    assert postcode.features is not None
+    assert postcode.features["association_mode"] == "row_first"
+    assert postcode.features["bar_count"] == 7
+    assert postcode.features["selected_row_size"] >= 7
+    assert postcode.features["alignment_error"] <= 0.55
+    assert postcode.features["row_y_spread_px"] <= postcode.features["row_tolerance_px"] * 2
 
 
 def test_seven_bar_rescue_accepts_full_regular_row_without_start_marker():
@@ -134,6 +171,7 @@ def test_seven_bar_rescue_accepts_full_regular_row_without_start_marker():
     assert postcode.detected_bbox is not None
     assert postcode.features is not None
     assert postcode.features["confirmation_mode"] == "seven_bar_rescue"
+    assert postcode.features["association_mode"] == "row_first"
     assert postcode.features["bar_count"] == 7
     assert postcode.features["start_marker_score"] < 0.40
     assert postcode.features["width_cv"] <= 0.12
@@ -159,6 +197,7 @@ def test_seven_bar_rescue_rejects_regular_row_too_high_in_letter():
     assert postcode.features is not None
     assert postcode.features["confirmation_mode"] == "none"
     assert postcode.features["rejection_reason"] == "row_not_low_enough"
+    assert postcode.features["association_mode"] == "row_first"
 
 
 def test_seven_bar_rescue_does_not_accept_six_bars_without_start_marker():
@@ -179,6 +218,7 @@ def test_seven_bar_rescue_does_not_accept_six_bars_without_start_marker():
     assert postcode.features is not None
     assert postcode.features["confirmation_mode"] == "none"
     assert postcode.features["rejection_reason"] == "insufficient_top_bars"
+    assert postcode.features["association_mode"] == "row_first"
 
 
 def test_postcode_does_not_fallback_to_arbitrary_dark_content():
