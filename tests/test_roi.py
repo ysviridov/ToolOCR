@@ -63,10 +63,37 @@ def test_dl_simple_mail_roi_detects_address_and_postcode_content():
     assert regions["recipient_postcode"].component_count > 0
 
 
-def test_first_roi_iteration_explicitly_limits_supported_formats():
-    image = np.full((500, 1000, 3), 255, dtype=np.uint8)
+def test_c4_simple_mail_roi_detects_address_and_postcode_content():
+    image = np.full((700, 1000, 3), 255, dtype=np.uint8)
+
+    # C4: адрес получателя в правой нижней части canonical-листа.
+    for row, width in enumerate((330, 360, 310, 280)):
+        y = 285 + row * 42
+        for x in range(555, 555 + width, 38):
+            cv2.rectangle(image, (x, y), (x + 20, y + 20), (0, 0, 0), -1)
+
+    # Шестизначный кодовый штамп в нижней левой части.
+    for index in range(6):
+        x = 110 + index * 54
+        cv2.rectangle(image, (x, 535), (x + 23, 585), (0, 0, 0), 4)
+        cv2.line(image, (x + 4, 575), (x + 19, 545), (0, 0, 0), 3)
 
     result = detect_simple_mail_rois(image, EnvelopeFormat.C4)
+    regions = {item.kind: item for item in result.regions}
+
+    assert result.status == "detected"
+    assert regions["recipient_address"].status == "detected"
+    assert regions["recipient_postcode"].status == "detected"
+    assert regions["recipient_address"].detected_bbox is not None
+    assert regions["recipient_postcode"].detected_bbox is not None
+    assert regions["recipient_address"].component_count > 0
+    assert regions["recipient_postcode"].component_count > 0
+
+
+def test_roi_unsupported_format_remains_explicit():
+    image = np.full((500, 1000, 3), 255, dtype=np.uint8)
+
+    result = detect_simple_mail_rois(image, EnvelopeFormat.B4)
 
     assert result.status == "unsupported_format"
     assert result.regions == ()
