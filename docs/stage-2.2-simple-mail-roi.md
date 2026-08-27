@@ -68,7 +68,42 @@ x=0.00 y=0.50 w=0.62 h=0.50
 
 Это только зона поиска anchor-pattern, а не итоговый ROI.
 
-Перед выделением плашек выполняется локальная компенсация медленного перепада освещения. Затем horizontal morphology выделяет широкие чёрные элементы. Кандидаты группируются в последовательность из семи позиций и оцениваются по:
+Перед выделением плашек выполняется локальная компенсация медленного перепада освещения. Затем horizontal morphology выделяет широкие чёрные элементы.
+
+### Row-first association
+
+На реальных C5 обнаружился класс false negative, где detector видел семь верхних плашек, но старый greedy matching связывал элементы только по X. Если под той же X-координатой находился нижний штрих `=` или горизонтальный штрих заполненной цифры, он мог попасть в одну из семи позиций верхней строки. После этого `alignment_error` становился большим и настоящий postcode отклонялся.
+
+Теперь association выполняется в два этапа:
+
+```text
+horizontal candidates
+        ->
+Y-clustering / rows
+        ->
+X-regularity внутри одного row
+        ->
+7 upper bars
+        ->
+отдельный поиск нижнего штриха '=' под первой верхней плашкой
+```
+
+Кандидаты верхних плашек сначала объединяются в горизонтальные Y-ряды. Допуск центра ряда равен `0.75 × median_bar_height`, но не менее `2 px` в detector-scale. В X-matching допускаются только элементы выбранного ряда. Нижняя половинная плашка `=` не участвует в seven-position matching и используется только как strict-подтверждение после выбора верхней строки.
+
+Это сохраняет прежние strict/rescue thresholds и устраняет первопричину `alignment_error_too_high` без расширения допустимой геометрической ошибки.
+
+В debug добавлены:
+
+```text
+association_mode = row_first
+row_cluster_count
+row_tolerance_px
+selected_row_index
+selected_row_size
+row_y_spread_px
+```
+
+Остальные структурные признаки остаются прежними:
 
 ```text
 bar_count
@@ -121,6 +156,7 @@ Strict-кандидат всегда имеет приоритет над rescue
   "features": {
     "confirmation_mode": "seven_bar_rescue",
     "rejection_reason": null,
+    "association_mode": "row_first",
     "bar_count": 7,
     "expected_bar_count": 7,
     "digit_count": 6,
@@ -129,6 +165,9 @@ Strict-кандидат всегда имеет приоритет над rescue
     "spacing_error": 0.02,
     "alignment_error": 0.08,
     "row_y_norm": 0.91,
+    "row_cluster_count": 2,
+    "selected_row_size": 7,
+    "row_y_spread_px": 2.0,
     "bar_width_px": 78.0,
     "bar_step_px": 98.0
   }
@@ -193,6 +232,6 @@ GET /v1/test-ui/images/{id}/roi/meta
 - распознавание текста адреса ещё не выполняется;
 - штрихкоды заказных отправлений не декодируются;
 - при `orientation=ambiguous` ROI не строятся;
-- seven-bar rescue нужно проверить сначала на известных C4 false negative, затем на полном 50-файловом C4-корпусе и отдельно на DL/C5.
+- row-first association нужно проверить сначала на двух известных C5 `alignment_error_too_high`, затем на полном C5/C4 корпусе и отдельно на DL.
 
 После corpus-validation отдельно анализируются false negative (`stencil_not_found`) и false positive. Для успешных детекций проверяется tightness bbox относительно семи плашек и шести цифр. Orientation при этом не меняется.
