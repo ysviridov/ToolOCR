@@ -84,6 +84,12 @@ _STENCIL_RESCUE_SPACING_ERROR_MAX = 0.08
 _STENCIL_RESCUE_ALIGNMENT_ERROR_MAX = 0.55
 _STENCIL_RESCUE_ROW_Y_NORM_MIN = 0.70
 
+# До проверки регулярности по X верхние плашки сначала объединяются в
+# горизонтальные ряды. Это не позволяет нижней половинной плашке '=' или
+# горизонтальным штрихам цифр занять одну из семи позиций верхней строки.
+_STENCIL_ROW_CENTER_TOLERANCE_HEIGHT = 0.75
+_STENCIL_ROW_CENTER_TOLERANCE_MIN_PX = 2.0
+
 ROI_COLORS_BGR: dict[str, tuple[int, int, int]] = {
     "recipient_address": (70, 175, 70),
     "recipient_postcode": (0, 155, 255),
@@ -231,6 +237,61 @@ def _normalize_stencil_gray(gray: np.ndarray) -> np.ndarray:
     return np.clip(corrected, 0, 255).astype(np.uint8)
 
 
+def _bar_center_x(bar: tuple[int, int, int, int, float]) -> float:
+    return bar[0] + bar[2] / 2.0
+
+
+def _bar_center_y(bar: tuple[int, int, int, int, float]) -> float:
+    return bar[1] + bar[3] / 2.0
+
+
+def _cluster_stencil_bar_rows(
+    top_bars: list[tuple[int, int, int, int, float]],
+) -> tuple[list[list[tuple[int, int, int, int, float]]], float]:
+    """Группирует потенциальные верхние плашки по общей Y-строке.
+
+    Кластеризация выполняется до X-matching. Поэтому элементы с тем же X,
+    но расположенные ниже (нижний штрих '=' и части цифр), не могут вытеснить
+    настоящую верхнюю плашку только из-за нулевой ошибки по X.
+    """
+
+    if not top_bars:
+        return [], _STENCIL_ROW_CENTER_TOLERANCE_MIN_PX
+
+    median_height = float(np.median([item[3] for item in top_bars]))
+    tolerance = max(
+        _STENCIL_ROW_CENTER_TOLERANCE_MIN_PX,
+        median_height * _STENCIL_ROW_CENTER_TOLERANCE_HEIGHT,
+    )
+
+    rows: list[list[tuple[int, int, int, int, float]]] = []
+    row_centers: list[float] = []
+    for bar in sorted(top_bars, key=lambda item: (_bar_center_y(item), _bar_center_x(item))):
+        center_y = _bar_center_y(bar)
+        compatible = [
+            (abs(center_y - row_center), index)
+            for index, row_center in enumerate(row_centers)
+            if abs(center_y - row_center) <= tolerance
+        ]
+        if not compatible:
+            rows.append([bar])
+            row_centers.append(center_y)
+            continue
+
+        _, row_index = min(compatible, key=lambda item: item[0])
+        rows[row_index].append(bar)
+        row_centers[row_index] = float(np.median([_bar_center_y(item) for item in rows[row_index]]))
+
+    for row in rows:
+        row.sort(key=_bar_center_x)
+
+    # В structural matching интересны только строки, где вообще возможно
+    # собрать минимум 6 из 7 верхних элементов.
+    rows = [row for row in rows if len(row) >= 6]
+    rows.sort(key=lambda row: float(np.median([_bar_center_y(item) for item in row])))
+    return rows, tolerance
+
+
 def _confirmation_mode(candidate: dict[str, Any]) -> str | None:
     strict = (
         candidate["score"] >= _STENCIL_STRICT_SCORE_MIN
@@ -273,12 +334,12 @@ def _postcode_stencil_bbox(
     image: np.ndarray,
     search: PixelRect,
 ) -> tuple[PixelRect | None, int, float, float, dict[str, Any]]:
-    """Ищет '= + 6 цифр' по геометрии верхних плашек и стартового '='.
+    """Ищет '= + 6 цифр' через row-first геометрию верхних плашек.
 
-    Основная ветка требует нижнюю половинную плашку стартового '='. Rescue
-    допускается без неё только для полной строки из семи практически
-    одинаковых и регулярно расположенных верхних плашек в нижней части
-    canonical-письма.
+    Сначала горизонтальные элементы группируются по Y. Регулярность семи
+    позиций по X оценивается только внутри одного ряда. Нижний штрих '='
+    ищется отдельно после выбора верхней строки и служит strict-подтверждением.
+    Seven-bar rescue остаётся резервной веткой для слабого start-marker.
     """
 
     crop = image[search.y:search.y2, search.x:search.x2]
@@ -286,6 +347,7 @@ def _postcode_stencil_bbox(
         return None, 0, 0.0, 0.0, {
             "confirmation_mode": "none",
             "rejection_reason": "empty_search_zone",
+            "association_mode": "row_first",
         }
 
     full_height, full_width = image.shape[:2]
@@ -343,114 +405,122 @@ def _postcode_stencil_bbox(
         and item[3] >= scaled_full_height * 0.005
         and item[4] >= 0.70
     ]
+    bar_rows, row_tolerance_px = _cluster_stencil_bar_rows(top_bars)
 
     structural: list[dict[str, Any]] = []
-    for first_index, first in enumerate(top_bars):
-        first_center = first[0] + first[2] / 2.0
-        for second_index, second in enumerate(top_bars):
-            if first_index == second_index:
-                continue
-            second_center = second[0] + second[2] / 2.0
-            if second_center <= first_center:
-                continue
-
-            mean_width = (first[2] + second[2]) / 2.0
-            step = second_center - first_center
-            if not (1.05 * mean_width <= step <= 1.65 * mean_width):
-                continue
-
-            matched: list[tuple[int, int, int, int, float] | None] = []
-            used: set[int] = set()
-            for position in range(7):
-                expected_x = first_center + position * step
-                options = [
-                    (
-                        abs((candidate[0] + candidate[2] / 2.0) - expected_x),
-                        index,
-                        candidate,
-                    )
-                    for index, candidate in enumerate(top_bars)
-                    if index not in used
-                    and abs((candidate[0] + candidate[2] / 2.0) - expected_x) <= 0.28 * step
-                ]
-                if not options:
-                    matched.append(None)
+    for row_index, row in enumerate(bar_rows):
+        for first_index, first in enumerate(row):
+            first_center = _bar_center_x(first)
+            for second_index, second in enumerate(row):
+                if first_index == second_index:
                     continue
-                _, index, candidate = min(options, key=lambda item: item[0])
-                used.add(index)
-                matched.append(candidate)
+                second_center = _bar_center_x(second)
+                if second_center <= first_center:
+                    continue
 
-            valid = [item for item in matched if item is not None]
-            if len(valid) < 6:
-                continue
+                mean_width = (first[2] + second[2]) / 2.0
+                step = second_center - first_center
+                if not (1.05 * mean_width <= step <= 1.65 * mean_width):
+                    continue
 
-            widths = np.asarray([item[2] for item in valid], dtype=np.float32)
-            heights = np.asarray([item[3] for item in valid], dtype=np.float32)
-            centers_x = np.asarray([item[0] + item[2] / 2.0 for item in valid], dtype=np.float32)
-            centers_y = np.asarray([item[1] + item[3] / 2.0 for item in valid], dtype=np.float32)
-            positions = np.asarray(
-                [index for index, item in enumerate(matched) if item is not None],
-                dtype=np.float32,
-            )
-
-            expected_x = first_center + positions * step
-            spacing_error = float(
-                np.sqrt(np.mean(np.square(centers_x - expected_x))) / max(step, 1.0)
-            )
-            width_cv = float(np.std(widths) / max(float(np.mean(widths)), 1.0))
-
-            line = np.polyfit(centers_x, centers_y, 1)
-            alignment_error = float(
-                np.sqrt(np.mean(np.square(centers_y - np.polyval(line, centers_x))))
-                / max(float(np.median(heights)), 1.0)
-            )
-            row_center_y_work = float(np.median(centers_y))
-            row_y_norm = float(
-                (search.y * scale + row_center_y_work) / max(scaled_full_height, 1.0)
-            )
-
-            start_bar = matched[0]
-            start_marker_score = 0.0
-            if start_bar is not None:
-                for candidate in candidates:
-                    if candidate == start_bar:
-                        continue
-                    same_x = abs(candidate[0] - start_bar[0]) <= 0.25 * start_bar[2]
-                    same_width = abs(candidate[2] - start_bar[2]) <= 0.30 * start_bar[2]
-                    below = (
-                        start_bar[1] + 0.8 * start_bar[3]
-                        <= candidate[1]
-                        <= start_bar[1] + 2.5 * start_bar[3]
-                    )
-                    half_height = 0.30 * start_bar[3] <= candidate[3] <= 0.80 * start_bar[3]
-                    if same_x and same_width and below and half_height:
-                        start_marker_score = max(
-                            start_marker_score,
-                            1.0 - abs(candidate[3] / float(start_bar[3]) - 0.5),
+                matched: list[tuple[int, int, int, int, float] | None] = []
+                used: set[int] = set()
+                for position in range(7):
+                    expected_x = first_center + position * step
+                    options = [
+                        (
+                            abs(_bar_center_x(candidate) - expected_x),
+                            index,
+                            candidate,
                         )
+                        for index, candidate in enumerate(row)
+                        if index not in used
+                        and abs(_bar_center_x(candidate) - expected_x) <= 0.28 * step
+                    ]
+                    if not options:
+                        matched.append(None)
+                        continue
+                    _, index, candidate = min(options, key=lambda item: item[0])
+                    used.add(index)
+                    matched.append(candidate)
 
-            score = (
-                (len(valid) / 7.0) * 0.45
-                + max(0.0, 1.0 - width_cv / 0.20) * 0.15
-                + max(0.0, 1.0 - spacing_error / 0.20) * 0.15
-                + max(0.0, 1.0 - alignment_error / 1.0) * 0.10
-                + start_marker_score * 0.15
-            )
+                valid = [item for item in matched if item is not None]
+                if len(valid) < 6:
+                    continue
 
-            structural.append(
-                {
-                    "score": float(score),
-                    "matched": matched,
-                    "bar_count": len(valid),
-                    "start_marker_score": float(start_marker_score),
-                    "width_cv": width_cv,
-                    "spacing_error": spacing_error,
-                    "alignment_error": alignment_error,
-                    "row_y_norm": row_y_norm,
-                    "bar_step_px_work": float(step),
-                    "bar_width_px_work": float(np.median(widths)),
-                }
-            )
+                widths = np.asarray([item[2] for item in valid], dtype=np.float32)
+                heights = np.asarray([item[3] for item in valid], dtype=np.float32)
+                centers_x = np.asarray([_bar_center_x(item) for item in valid], dtype=np.float32)
+                centers_y = np.asarray([_bar_center_y(item) for item in valid], dtype=np.float32)
+                positions = np.asarray(
+                    [index for index, item in enumerate(matched) if item is not None],
+                    dtype=np.float32,
+                )
+
+                expected_x = first_center + positions * step
+                spacing_error = float(
+                    np.sqrt(np.mean(np.square(centers_x - expected_x))) / max(step, 1.0)
+                )
+                width_cv = float(np.std(widths) / max(float(np.mean(widths)), 1.0))
+
+                line = np.polyfit(centers_x, centers_y, 1)
+                alignment_error = float(
+                    np.sqrt(np.mean(np.square(centers_y - np.polyval(line, centers_x))))
+                    / max(float(np.median(heights)), 1.0)
+                )
+                row_center_y_work = float(np.median(centers_y))
+                row_y_norm = float(
+                    (search.y * scale + row_center_y_work) / max(scaled_full_height, 1.0)
+                )
+                row_y_spread_px = float(np.max(centers_y) - np.min(centers_y))
+
+                start_bar = matched[0]
+                start_marker_score = 0.0
+                if start_bar is not None:
+                    for candidate in candidates:
+                        if candidate == start_bar:
+                            continue
+                        # Нижний штрих '=' ищется только после выбора верхней
+                        # строки и никогда не участвует в seven-position matching.
+                        same_x = abs(candidate[0] - start_bar[0]) <= 0.25 * start_bar[2]
+                        same_width = abs(candidate[2] - start_bar[2]) <= 0.30 * start_bar[2]
+                        below = (
+                            start_bar[1] + 0.8 * start_bar[3]
+                            <= candidate[1]
+                            <= start_bar[1] + 2.5 * start_bar[3]
+                        )
+                        half_height = 0.30 * start_bar[3] <= candidate[3] <= 0.80 * start_bar[3]
+                        if same_x and same_width and below and half_height:
+                            start_marker_score = max(
+                                start_marker_score,
+                                1.0 - abs(candidate[3] / float(start_bar[3]) - 0.5),
+                            )
+
+                score = (
+                    (len(valid) / 7.0) * 0.45
+                    + max(0.0, 1.0 - width_cv / 0.20) * 0.15
+                    + max(0.0, 1.0 - spacing_error / 0.20) * 0.15
+                    + max(0.0, 1.0 - alignment_error / 1.0) * 0.10
+                    + start_marker_score * 0.15
+                )
+
+                structural.append(
+                    {
+                        "score": float(score),
+                        "matched": matched,
+                        "bar_count": len(valid),
+                        "start_marker_score": float(start_marker_score),
+                        "width_cv": width_cv,
+                        "spacing_error": spacing_error,
+                        "alignment_error": alignment_error,
+                        "row_y_norm": row_y_norm,
+                        "row_index": row_index,
+                        "row_size": len(row),
+                        "row_y_spread_px_work": row_y_spread_px,
+                        "bar_step_px_work": float(step),
+                        "bar_width_px_work": float(np.median(widths)),
+                    }
+                )
 
     strict_candidates = [
         item for item in structural if _confirmation_mode(item) == "strict_start_marker"
@@ -482,8 +552,11 @@ def _postcode_stencil_bbox(
             {
                 "confirmation_mode": "none",
                 "rejection_reason": _rejection_reason(best_failed),
+                "association_mode": "row_first",
                 "candidate_count": len(candidates),
                 "top_bar_candidate_count": len(top_bars),
+                "row_cluster_count": len(bar_rows),
+                "row_tolerance_px": round(float(row_tolerance_px), 2),
                 "best_score": None if best_failed is None else round(float(best_failed["score"]), 4),
                 "bar_count": None if best_failed is None else int(best_failed["bar_count"]),
                 "start_marker_score": None if best_failed is None else round(float(best_failed["start_marker_score"]), 4),
@@ -491,6 +564,9 @@ def _postcode_stencil_bbox(
                 "spacing_error": None if best_failed is None else round(float(best_failed["spacing_error"]), 4),
                 "alignment_error": None if best_failed is None else round(float(best_failed["alignment_error"]), 4),
                 "row_y_norm": None if best_failed is None else round(float(best_failed["row_y_norm"]), 4),
+                "selected_row_index": None if best_failed is None else int(best_failed["row_index"]),
+                "selected_row_size": None if best_failed is None else int(best_failed["row_size"]),
+                "row_y_spread_px": None if best_failed is None else round(float(best_failed["row_y_spread_px_work"] / scale), 2),
                 "threshold": round(dark_threshold, 2),
             },
         )
@@ -527,6 +603,7 @@ def _postcode_stencil_bbox(
     features = {
         "confirmation_mode": confirmation_mode,
         "rejection_reason": None,
+        "association_mode": "row_first",
         "bar_count": int(best["bar_count"]),
         "expected_bar_count": 7,
         "digit_count": 6,
@@ -535,6 +612,11 @@ def _postcode_stencil_bbox(
         "spacing_error": round(float(best["spacing_error"]), 4),
         "alignment_error": round(float(best["alignment_error"]), 4),
         "row_y_norm": round(float(best["row_y_norm"]), 4),
+        "row_cluster_count": len(bar_rows),
+        "row_tolerance_px": round(float(row_tolerance_px * inverse_scale), 2),
+        "selected_row_index": int(best["row_index"]),
+        "selected_row_size": int(best["row_size"]),
+        "row_y_spread_px": round(float(best["row_y_spread_px_work"] * inverse_scale), 2),
         "bar_width_px": round(float(best["bar_width_px_work"] * inverse_scale), 2),
         "bar_step_px": round(float(best["bar_step_px_work"] * inverse_scale), 2),
         "threshold": round(dark_threshold, 2),
