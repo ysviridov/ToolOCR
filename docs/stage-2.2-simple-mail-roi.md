@@ -206,7 +206,7 @@ Format-specific search zones продолжают использоваться �
 - `Canonical` — rectified-письмо после обязательного поворота 0/180;
 - `ROI` — canonical-письмо с разметкой ROI.
 
-Цвета:
+Цвета overlay:
 
 - зелёный — `recipient_address`;
 - оранжевый — `recipient_postcode`.
@@ -214,6 +214,58 @@ Format-specific search zones продолжают использоваться �
 Strict detection подписывается как `POSTCODE STENCIL <confidence>`, rescue — как `POSTCODE STENCIL RESCUE <confidence>`.
 
 Пунктирная оранжевая рамка показывает широкий сектор поиска, толстая сплошная — фактически найденный трафаретный блок. Preview генерируется по запросу и на диск не сохраняется.
+
+## Диагностика качества входа в Test UI
+
+Цвет кнопки `ROI` в результатах batch-теста отражает не только результат postcode detector, но и вероятную причину отказа:
+
+```text
+зелёный  -> strict_start_marker
+жёлтый   -> seven_bar_rescue
+серый    -> postcode не найден, но есть признаки дефектного/cropped входа
+красный  -> postcode не найден без явных признаков проблемной геометрии
+белый    -> ROI не оценивался
+```
+
+Серый статус называется `partial_crop_suspected`. Это только UI-диагностика и не является новым layout hard-gate. Он выставляется только после `stencil_not_found`, если дополнительно присутствует хотя бы один сильный геометрический признак:
+
+```text
+partial_frame по left/bottom
+width shortfall >= 3% относительно expected format
+height shortfall >= 3%
+асимметрия left/right height >= 5% высоты формата
+асимметрия top/bottom width >= 3% ширины формата
+```
+
+Успешный strict/rescue postcode не понижается до серого даже при `partial_frame`: если технический блок найден полностью, ROI считается пригодным.
+
+В колонке `Normalization` для подозрительного кадра появляется badge `INPUT: crop?`. Tooltip кнопки ROI и badge показывает причины, например:
+
+```text
+partial_frame:bottom
+width_shortfall:6.4%
+side_height_asymmetry:12.8%
+```
+
+В debug export добавляется:
+
+```json
+"test_ui_input_quality": {
+  "status": "partial_crop_suspected",
+  "reasons": [
+    "width_shortfall:6.4%",
+    "side_height_asymmetry:12.8%"
+  ],
+  "metrics": {
+    "frame_status": "full_frame",
+    "expected_width_mm": 324.0,
+    "measured_width_mm": 303.0,
+    "width_shortfall_ratio": 0.0648
+  }
+}
+```
+
+Это позволяет отделять реальные ошибки detector от случаев, когда часть postcode физически потеряна из-за загнутого угла, неполного кадра или ошибочной геометрии crop.
 
 ## Test UI API
 
@@ -232,6 +284,6 @@ GET /v1/test-ui/images/{id}/roi/meta
 - распознавание текста адреса ещё не выполняется;
 - штрихкоды заказных отправлений не декодируются;
 - при `orientation=ambiguous` ROI не строятся;
-- row-first association нужно проверить сначала на двух известных C5 `alignment_error_too_high`, затем на полном C5/C4 корпусе и отдельно на DL.
+- `partial_crop_suspected` является диагностическим UI-эвристическим статусом, а не доказательством физического дефекта.
 
 После corpus-validation отдельно анализируются false negative (`stencil_not_found`) и false positive. Для успешных детекций проверяется tightness bbox относительно семи плашек и шести цифр. Orientation при этом не меняется.
