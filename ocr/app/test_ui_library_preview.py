@@ -104,7 +104,6 @@ _PREVIEW_SCRIPT = r"""
 (() => {
   const libraryBody = document.getElementById('libraryBody');
   const resultBody = document.getElementById('resultBody');
-  const resultStats = document.getElementById('resultStats');
   const dialog = document.getElementById('cropDialog');
   const title = document.getElementById('cropTitle');
   const image = document.getElementById('cropImage');
@@ -202,13 +201,22 @@ _PREVIEW_SCRIPT = r"""
       return;
     }
 
+    const badgeTitle = inputQualityText(item);
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'input-quality-badge suspect';
+      badge.textContent = 'INPUT: crop?';
+      badge.title = badgeTitle;
       normalizationCell.appendChild(badge);
+      return;
     }
-    badge.textContent = 'INPUT: crop?';
-    badge.title = inputQualityText(item);
+
+    // MutationObserver наблюдает childList. Повторная запись textContent
+    // создавала новую childList-мутацию и могла зациклить UI. Для уже
+    // существующего badge меняем только attribute, если он действительно изменился.
+    if (badge.title !== badgeTitle) {
+      badge.title = badgeTitle;
+    }
   }
 
   function applyRoiButtonColors() {
@@ -269,12 +277,6 @@ def _empty_postcode_summary(note: str) -> dict[str, Any]:
     }
     summary.update(_empty_input_quality())
     return summary
-
-
-def _safe_ratio(numerator: float | None, denominator: float) -> float | None:
-    if numerator is None or denominator <= 0:
-        return None
-    return float(numerator) / denominator
 
 
 def _input_quality_for_failed_postcode(
