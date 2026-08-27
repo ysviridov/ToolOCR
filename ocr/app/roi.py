@@ -44,6 +44,8 @@ class RoiRegion:
     bbox: PixelRect
     component_count: int
     ink_density: float
+    detector: str = "foreground"
+    features: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,28 +58,25 @@ class RoiDetection:
     source_reference: str
 
 
-# Это расширенные поисковые зоны, а не нормативные границы адресных зон.
-# Они получены из компоновки обязательного приложения А ГОСТ Р 51506-99
-# и намеренно содержат запас для реального рукописного текста.
-#
-# C4 добавлен как отдельный профиль: на реальных бланках этого формата
-# адрес получателя расположен в правой нижней части лицевой стороны, а
-# шестизначный кодовый штамп — в нижней левой части. Координаты первой
-# итерации специально широкие и подлежат уточнению по production-корпусу.
+# Расширенные поисковые зоны адреса. Это не нормативные границы ГОСТ:
+# внутри них CV уточняет фактический bbox рукописного/печатного текста.
 _GOST_GUIDED_SEARCH_ZONES: dict[EnvelopeFormat, dict[str, RectNormalized]] = {
     EnvelopeFormat.DL: {
         "recipient_address": RectNormalized(0.50, 0.27, 0.47, 0.50),
-        "recipient_postcode": RectNormalized(0.05, 0.66, 0.47, 0.31),
     },
     EnvelopeFormat.C5: {
         "recipient_address": RectNormalized(0.50, 0.28, 0.47, 0.48),
-        "recipient_postcode": RectNormalized(0.05, 0.68, 0.47, 0.29),
     },
     EnvelopeFormat.C4: {
         "recipient_address": RectNormalized(0.49, 0.30, 0.48, 0.48),
-        "recipient_postcode": RectNormalized(0.05, 0.68, 0.45, 0.29),
     },
 }
+
+# Трафаретный шестизначный индекс — отдельный технический объект. Он
+# расположен в левом нижнем секторе и имеет одинаковую структуру для
+# поддерживаемых форматов: стартовый знак '=' + шесть ячеек цифр. Поэтому
+# postcode больше не привязывается к приблизительному format-specific bbox.
+_POSTCODE_STENCIL_SEARCH_ZONE = RectNormalized(0.0, 0.50, 0.62, 0.50)
 
 ROI_COLORS_BGR: dict[str, tuple[int, int, int]] = {
     "recipient_address": (70, 175, 70),
@@ -96,11 +95,7 @@ def canonicalize_rectified(
     orientation_status: str | None,
     orientation_deg: int | None,
 ) -> CanonicalImage:
-    """Приводит rectified-письмо к единой ориентации перед ROI/OCR.
-
-    При ambiguous изображение не угадывается и возвращается без поворота,
-    но reliable=False. ROI/OCR должны проверять этот флаг.
-    """
+    """Приводит rectified-письмо к единой ориентации перед ROI/OCR."""
 
     if image is None or image.size == 0:
         raise ValueError("Пустое rectified-изображение")
@@ -160,7 +155,6 @@ def _foreground_bbox(
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Убираем границу поисковой зоны, чтобы край конверта/рамки не стал ROI.
     pad_x = max(2, round(search.width * 0.012))
     pad_y = max(2, round(search.height * 0.018))
     binary[:pad_y, :] = 0
@@ -170,7 +164,7 @@ def _foreground_bbox(
 
     count, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     crop_area = float(search.width * search.height)
-    min_area = max(5, int(crop_area * (0.000018 if kind == "recipient_address" else 0.000012)))
+    min_area = max(5, int(crop_area * 0.000018))
     max_area = max(min_area + 1, int(crop_area * 0.075))
     min_h = max(3, int(search.height * 0.018))
     max_h = max(min_h + 1, int(search.height * 0.42))
@@ -183,7 +177,6 @@ def _foreground_bbox(
             continue
         if h < min_h or h > max_h or w < 2:
             continue
-        # Длинные тонкие направляющие/границы не считаем содержимым.
         if w / float(max(1, h)) > 28.0 and h < search.height * 0.07:
             continue
         boxes.append((x, y, w, h, area))
@@ -213,20 +206,255 @@ def _foreground_bbox(
     )
 
     density = ink_pixels / crop_area if crop_area else 0.0
-    component_score = min(1.0, len(boxes) / (9.0 if kind == "recipient_address" else 7.0))
-    density_target = 0.022 if kind == "recipient_address" else 0.017
-    density_score = min(1.0, density / density_target) if density_target else 0.0
+    component_score = min(1.0, len(boxes) / 9.0)
+    density_score = min(1.0, density / 0.022)
     confidence = round(min(0.99, 0.25 + 0.45 * component_score + 0.30 * density_score), 4)
     return detected, len(boxes), round(density, 6), confidence
 
 
-def detect_simple_mail_rois(image: np.ndarray, envelope_format: EnvelopeFormat) -> RoiDetection:
-    """Находит ROI простого письма на canonical rectified изображении.
+def _normalize_stencil_gray(gray: np.ndarray) -> np.ndarray:
+    """Компенсирует медленные перепады освещённости для stencil detector."""
 
-    Текущая цель Stage 2.2 — только рукописные/машинописные блоки простых
-    писем: адрес получателя и шестизначный индекс места назначения.
-    Штрихкоды заказных отправлений намеренно не распознаются здесь.
+    height, width = gray.shape[:2]
+    sigma = max(12.0, min(height, width) * 0.025)
+    kernel_size = min(151, max(31, int(round(sigma * 4.0)) * 2 + 1))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    background = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
+    corrected = gray.astype(np.float32) * 235.0 / np.maximum(background.astype(np.float32), 40.0)
+    return np.clip(corrected, 0, 255).astype(np.uint8)
+
+
+def _postcode_stencil_bbox(
+    image: np.ndarray,
+    search: PixelRect,
+) -> tuple[PixelRect | None, int, float, float, dict[str, Any]]:
+    """Ищет технический блок '= + 6 цифр' по геометрии верхних плашек.
+
+    Основной инвариант:
+    - семь почти одинаковых широких чёрных прямоугольников в одной линии;
+    - регулярный шаг между ними;
+    - под первым прямоугольником расположен второй, примерно вдвое тоньше.
+
+    Это позволяет отличать postcode от рукописи, штрихкода и декоративной
+    печати без OCR и без точной привязки к абсолютному format-specific ROI.
     """
+
+    crop = image[search.y:search.y2, search.x:search.x2]
+    if crop.size == 0:
+        return None, 0, 0.0, 0.0, {"reason": "empty_search_zone"}
+
+    full_height, full_width = image.shape[:2]
+    crop_height, crop_width = crop.shape[:2]
+
+    max_detector_side = 1200
+    scale = min(1.0, max_detector_side / float(max(crop_height, crop_width)))
+    if scale < 1.0:
+        work = cv2.resize(
+            crop,
+            (max(1, int(round(crop_width * scale))), max(1, int(round(crop_height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        work = crop
+
+    work_height, work_width = work.shape[:2]
+    scaled_full_width = full_width * scale
+    scaled_full_height = full_height * scale
+
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY) if work.ndim == 3 else work
+    gray = _normalize_stencil_gray(gray)
+    otsu_threshold, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    dark_threshold = float(np.clip(otsu_threshold, 135.0, 190.0))
+    binary = np.where(gray < dark_threshold, 255, 0).astype(np.uint8)
+
+    kernel_width = max(9, int(round(scaled_full_width * 0.008)))
+    kernel_height = max(2, int(round(scaled_full_height * 0.0015)))
+    horizontal = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, kernel_height)),
+    )
+
+    contours, _ = cv2.findContours(horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates: list[tuple[int, int, int, int, float]] = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        aspect = width / float(max(1, height))
+        if not (scaled_full_width * 0.008 <= width <= scaled_full_width * 0.055):
+            continue
+        if not (scaled_full_height * 0.002 <= height <= scaled_full_height * 0.025):
+            continue
+        if aspect < 2.5:
+            continue
+        fill = float(np.mean(binary[y:y + height, x:x + width] > 0))
+        if fill < 0.45:
+            continue
+        candidates.append((x, y, width, height, fill))
+
+    top_bars = [
+        item
+        for item in candidates
+        if item[2] >= scaled_full_width * 0.012
+        and item[3] >= scaled_full_height * 0.005
+        and item[4] >= 0.70
+    ]
+
+    best: dict[str, Any] | None = None
+    for first_index, first in enumerate(top_bars):
+        first_center = first[0] + first[2] / 2.0
+        for second_index, second in enumerate(top_bars):
+            if first_index == second_index:
+                continue
+            second_center = second[0] + second[2] / 2.0
+            if second_center <= first_center:
+                continue
+
+            mean_width = (first[2] + second[2]) / 2.0
+            step = second_center - first_center
+            if not (1.05 * mean_width <= step <= 1.65 * mean_width):
+                continue
+
+            matched: list[tuple[int, int, int, int, float] | None] = []
+            used: set[int] = set()
+            for position in range(7):
+                expected_x = first_center + position * step
+                options = [
+                    (
+                        abs((candidate[0] + candidate[2] / 2.0) - expected_x),
+                        index,
+                        candidate,
+                    )
+                    for index, candidate in enumerate(top_bars)
+                    if index not in used
+                    and abs((candidate[0] + candidate[2] / 2.0) - expected_x) <= 0.28 * step
+                ]
+                if not options:
+                    matched.append(None)
+                    continue
+                _, index, candidate = min(options, key=lambda item: item[0])
+                used.add(index)
+                matched.append(candidate)
+
+            valid = [item for item in matched if item is not None]
+            if len(valid) < 6:
+                continue
+
+            widths = np.asarray([item[2] for item in valid], dtype=np.float32)
+            heights = np.asarray([item[3] for item in valid], dtype=np.float32)
+            centers_x = np.asarray([item[0] + item[2] / 2.0 for item in valid], dtype=np.float32)
+            centers_y = np.asarray([item[1] + item[3] / 2.0 for item in valid], dtype=np.float32)
+            positions = np.asarray([index for index, item in enumerate(matched) if item is not None], dtype=np.float32)
+
+            expected_x = first_center + positions * step
+            spacing_error = float(np.sqrt(np.mean(np.square(centers_x - expected_x))) / max(step, 1.0))
+            width_cv = float(np.std(widths) / max(float(np.mean(widths)), 1.0))
+
+            line = np.polyfit(centers_x, centers_y, 1)
+            alignment_error = float(
+                np.sqrt(np.mean(np.square(centers_y - np.polyval(line, centers_x))))
+                / max(float(np.median(heights)), 1.0)
+            )
+
+            start_bar = matched[0]
+            start_marker_score = 0.0
+            if start_bar is not None:
+                for candidate in candidates:
+                    if candidate == start_bar:
+                        continue
+                    same_x = abs(candidate[0] - start_bar[0]) <= 0.25 * start_bar[2]
+                    same_width = abs(candidate[2] - start_bar[2]) <= 0.30 * start_bar[2]
+                    below = start_bar[1] + 0.8 * start_bar[3] <= candidate[1] <= start_bar[1] + 2.5 * start_bar[3]
+                    half_height = 0.30 * start_bar[3] <= candidate[3] <= 0.80 * start_bar[3]
+                    if same_x and same_width and below and half_height:
+                        start_marker_score = max(
+                            start_marker_score,
+                            1.0 - abs(candidate[3] / float(start_bar[3]) - 0.5),
+                        )
+
+            score = (
+                (len(valid) / 7.0) * 0.45
+                + max(0.0, 1.0 - width_cv / 0.20) * 0.15
+                + max(0.0, 1.0 - spacing_error / 0.20) * 0.15
+                + max(0.0, 1.0 - alignment_error / 1.0) * 0.10
+                + start_marker_score * 0.15
+            )
+
+            candidate_result = {
+                "score": float(score),
+                "matched": matched,
+                "bar_count": len(valid),
+                "start_marker_score": float(start_marker_score),
+                "width_cv": width_cv,
+                "spacing_error": spacing_error,
+                "alignment_error": alignment_error,
+                "bar_step_px_work": float(step),
+                "bar_width_px_work": float(np.median(widths)),
+            }
+            if best is None or candidate_result["score"] > best["score"]:
+                best = candidate_result
+
+    if best is None or best["score"] < 0.78 or best["start_marker_score"] < 0.40:
+        return (
+            None,
+            0 if best is None else int(best["bar_count"]),
+            0.0,
+            0.0 if best is None else round(float(best["score"]), 4),
+            {
+                "reason": "stencil_pattern_not_confirmed",
+                "candidate_count": len(candidates),
+                "top_bar_candidate_count": len(top_bars),
+                "best_score": None if best is None else round(float(best["score"]), 4),
+                "start_marker_score": None if best is None else round(float(best["start_marker_score"]), 4),
+                "threshold": round(dark_threshold, 2),
+            },
+        )
+
+    matched_valid = [item for item in best["matched"] if item is not None]
+    bar_width = float(np.median([item[2] for item in matched_valid]))
+    local_x1 = max(0, int(round(min(item[0] for item in matched_valid) - 0.15 * bar_width)))
+    local_x2 = min(work_width, int(round(max(item[0] + item[2] for item in matched_valid) + 0.15 * bar_width)))
+    local_y1 = max(0, int(round(min(item[1] for item in matched_valid) - 0.12 * bar_width)))
+    top_bar_bottom = max(item[1] + item[3] for item in matched_valid)
+    local_y2 = min(work_height, int(round(top_bar_bottom + 2.45 * bar_width)))
+
+    inverse_scale = 1.0 / scale
+    detected = PixelRect(
+        search.x + int(round(local_x1 * inverse_scale)),
+        search.y + int(round(local_y1 * inverse_scale)),
+        max(1, int(round((local_x2 - local_x1) * inverse_scale))),
+        max(1, int(round((local_y2 - local_y1) * inverse_scale))),
+    )
+    detected = _clip_rect(detected, full_width, full_height)
+
+    scaled_local = PixelRect(local_x1, local_y1, max(1, local_x2 - local_x1), max(1, local_y2 - local_y1))
+    stencil_crop = binary[scaled_local.y:scaled_local.y2, scaled_local.x:scaled_local.x2]
+    ink_density = float(np.mean(stencil_crop > 0)) if stencil_crop.size else 0.0
+
+    features = {
+        "bar_count": int(best["bar_count"]),
+        "expected_bar_count": 7,
+        "digit_count": 6,
+        "start_marker_score": round(float(best["start_marker_score"]), 4),
+        "width_cv": round(float(best["width_cv"]), 4),
+        "spacing_error": round(float(best["spacing_error"]), 4),
+        "alignment_error": round(float(best["alignment_error"]), 4),
+        "bar_width_px": round(float(best["bar_width_px_work"] * inverse_scale), 2),
+        "bar_step_px": round(float(best["bar_step_px_work"] * inverse_scale), 2),
+        "threshold": round(dark_threshold, 2),
+        "detector_scale": round(scale, 4),
+    }
+    return (
+        detected,
+        int(best["bar_count"]),
+        round(ink_density, 6),
+        round(min(0.99, float(best["score"])), 4),
+        features,
+    )
+
+
+def detect_simple_mail_rois(image: np.ndarray, envelope_format: EnvelopeFormat) -> RoiDetection:
+    """Находит адрес и трафаретный шестизначный индекс простого письма."""
 
     if image is None or image.size == 0:
         raise ValueError("Пустое canonical-изображение")
@@ -245,35 +473,68 @@ def detect_simple_mail_rois(image: np.ndarray, envelope_format: EnvelopeFormat) 
     height, width = image.shape[:2]
     regions: list[RoiRegion] = []
     detected_count = 0
-    for kind in ("recipient_address", "recipient_postcode"):
-        search = _rect_to_pixels(zones[kind], width, height)
-        detected, component_count, density, confidence = _foreground_bbox(
-            image,
-            search,
-            kind=kind,
-        )
-        if detected is not None:
-            detected = _clip_rect(detected, width, height)
-            status = "detected"
-            final_bbox = detected
-            detected_count += 1
-        else:
-            status = "search_zone_only"
-            final_bbox = search
-            confidence = 0.15
 
-        regions.append(
-            RoiRegion(
-                kind=kind,
-                status=status,
-                confidence=confidence,
-                search_bbox=search,
-                detected_bbox=detected,
-                bbox=final_bbox,
-                component_count=component_count,
-                ink_density=density,
-            )
+    address_search = _rect_to_pixels(zones["recipient_address"], width, height)
+    address_bbox, component_count, density, confidence = _foreground_bbox(
+        image,
+        address_search,
+        kind="recipient_address",
+    )
+    if address_bbox is not None:
+        address_bbox = _clip_rect(address_bbox, width, height)
+        address_status = "detected"
+        address_final = address_bbox
+        detected_count += 1
+    else:
+        address_status = "search_zone_only"
+        address_final = address_search
+        confidence = 0.15
+
+    regions.append(
+        RoiRegion(
+            kind="recipient_address",
+            status=address_status,
+            confidence=confidence,
+            search_bbox=address_search,
+            detected_bbox=address_bbox,
+            bbox=address_final,
+            component_count=component_count,
+            ink_density=density,
+            detector="foreground",
         )
+    )
+
+    postcode_search = _rect_to_pixels(_POSTCODE_STENCIL_SEARCH_ZONE, width, height)
+    postcode_bbox, bar_count, density, confidence, stencil_features = _postcode_stencil_bbox(
+        image,
+        postcode_search,
+    )
+    if postcode_bbox is not None:
+        postcode_status = "stencil_detected"
+        postcode_final = postcode_bbox
+        detected_count += 1
+    else:
+        # Generic foreground fallback намеренно не используется: если
+        # структурный шаблон не подтверждён, лучше показать search zone и
+        # оставить false negative, чем уверенно вернуть чужой текст/рисунок.
+        postcode_status = "stencil_not_found"
+        postcode_final = postcode_search
+        confidence = min(0.25, confidence)
+
+    regions.append(
+        RoiRegion(
+            kind="recipient_postcode",
+            status=postcode_status,
+            confidence=confidence,
+            search_bbox=postcode_search,
+            detected_bbox=postcode_bbox,
+            bbox=postcode_final,
+            component_count=bar_count,
+            ink_density=density,
+            detector="postcode_stencil",
+            features=stencil_features,
+        )
+    )
 
     return RoiDetection(
         status="detected" if detected_count == len(regions) else "partial",
@@ -281,7 +542,7 @@ def detect_simple_mail_rois(image: np.ndarray, envelope_format: EnvelopeFormat) 
         coordinate_space="canonical_rectified",
         mail_class="simple",
         regions=tuple(regions),
-        source_reference="ГОСТ Р 51506-99, приложение А; расширенные поисковые зоны ToolOCR",
+        source_reference="ГОСТ Р 51506-99, приложение А и Д; postcode stencil detector ToolOCR",
     )
 
 
@@ -313,6 +574,8 @@ def roi_detection_to_dict(result: RoiDetection) -> dict[str, Any]:
                 "bbox": pixel_rect_to_dict(region.bbox),
                 "component_count": region.component_count,
                 "ink_density": region.ink_density,
+                "detector": region.detector,
+                "features": region.features,
             }
             for region in result.regions
         ],
@@ -363,7 +626,8 @@ def draw_roi_overlay(image: np.ndarray, result: RoiDetection) -> np.ndarray:
                 detected_thickness,
             )
 
-        label = f"{ROI_LABELS[region.kind]} {region.confidence:.2f}"
+        detector_suffix = " STENCIL" if region.detector == "postcode_stencil" else ""
+        label = f"{ROI_LABELS[region.kind]}{detector_suffix} {region.confidence:.2f}"
         anchor = region.detected_bbox or region.search_bbox
         text_y = max(22, anchor.y - max(7, round(7 * scale)))
         cv2.putText(
