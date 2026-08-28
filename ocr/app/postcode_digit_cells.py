@@ -86,7 +86,8 @@ def derive_postcode_digit_geometry(
             source="stencil_upper_bar_geometry",
             cells=(),
         )
-    if postcode.status != "stencil_detected" or postcode.detected_bbox is None:
+    detected_bbox = getattr(postcode, "detected_bbox", None)
+    if getattr(postcode, "status", None) != "stencil_detected" or detected_bbox is None:
         return PostcodeDigitGeometry(
             status="unavailable",
             reason="postcode_not_detected",
@@ -94,7 +95,7 @@ def derive_postcode_digit_geometry(
             cells=(),
         )
 
-    features = postcode.features or {}
+    features = getattr(postcode, "features", None) or {}
     confirmation_mode = features.get("confirmation_mode")
     if confirmation_mode not in {"strict_start_marker", "seven_bar_rescue"}:
         return PostcodeDigitGeometry(
@@ -140,7 +141,7 @@ def derive_postcode_digit_geometry(
             bar_step_px=bar_step,
         )
 
-    start_center_x = postcode.detected_bbox.x + 0.65 * bar_width
+    start_center_x = detected_bbox.x + 0.65 * bar_width
     row_center_y = row_y_norm * image_height
     digit_y1 = row_center_y + _DIGIT_CELL_TOP_FROM_ROW_CENTER_BAR_WIDTH * bar_width
     digit_y2 = row_center_y + _DIGIT_CELL_BOTTOM_FROM_ROW_CENTER_BAR_WIDTH * bar_width
