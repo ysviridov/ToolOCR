@@ -5,3 +5,4 @@ config/camera-calibration.json
 __pycache__/
 *.pyc
 .pytest_cache/
+.toolocr-training/
