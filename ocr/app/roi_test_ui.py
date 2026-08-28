@@ -11,6 +11,12 @@ from .format_modes import FormatMode
 from .gost_r_51506_99 import EnvelopeFormat
 from .layout import rectify_envelope
 from .layout_api import analyze_layout
+from .postcode_digit_cells import (
+    derive_postcode_digit_geometry,
+    draw_postcode_digit_cells,
+    postcode_digit_cells_to_dict,
+    postcode_digit_geometry_to_dict,
+)
 from .roi import canonicalize_rectified, detect_simple_mail_rois, draw_roi_overlay, roi_detection_to_dict
 from .test_ui import _decode_image, _image_path, _load_metadata, _validate_file_id
 
@@ -152,7 +158,14 @@ async def roi_preview(
             },
         )
 
+    digit_geometry = derive_postcode_digit_geometry(
+        roi,
+        image_width=int(canonical.image.shape[1]),
+        image_height=int(canonical.image.shape[0]),
+    )
     overlay = draw_roi_overlay(canonical.image, roi)
+    draw_postcode_digit_cells(overlay, digit_geometry)
+
     headers = _common_headers(
         analysis,
         view="roi",
@@ -162,6 +175,8 @@ async def roi_preview(
         {
             "X-ToolOCR-ROI-Status": roi.status,
             "X-ToolOCR-ROI-Coordinate-Space": roi.coordinate_space,
+            "X-ToolOCR-Digit-Geometry": digit_geometry.status,
+            "X-ToolOCR-Digit-Cells": str(len(digit_geometry.cells)),
         }
     )
     return Response(
@@ -188,6 +203,20 @@ async def roi_metadata(
         raise HTTPException(status_code=422, detail={"reason": "format_unresolved"})
     envelope_format = EnvelopeFormat(format_value)
     roi = detect_simple_mail_rois(canonical.image, envelope_format)
+
+    digit_geometry = derive_postcode_digit_geometry(
+        roi,
+        image_width=int(canonical.image.shape[1]),
+        image_height=int(canonical.image.shape[0]),
+    )
+    roi_payload = roi_detection_to_dict(roi)
+    for region in roi_payload.get("regions", []):
+        if region.get("kind") != "recipient_postcode":
+            continue
+        region["digit_geometry"] = postcode_digit_geometry_to_dict(digit_geometry)
+        region["digit_cells"] = postcode_digit_cells_to_dict(digit_geometry)
+        break
+
     return {
         "stage": "2.2",
         "filename": name,
@@ -198,5 +227,5 @@ async def roi_metadata(
             "width_px": int(canonical.image.shape[1]),
             "height_px": int(canonical.image.shape[0]),
         },
-        "roi": roi_detection_to_dict(roi),
+        "roi": roi_payload,
     }
