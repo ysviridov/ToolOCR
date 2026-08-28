@@ -178,13 +178,13 @@ async def roi_preview(
         digit_geometry,
         labels=postcode_digit_overlay_labels(recognition),
     )
-    draw_postcode_recognition_summary(overlay, digit_geometry, recognition)
     overlay = append_postcode_preprocess_strip(
         overlay,
         canonical.image,
         digit_geometry,
         recognition,
     )
+    draw_postcode_recognition_summary(overlay, digit_geometry, recognition)
 
     headers = _common_headers(
         analysis,
