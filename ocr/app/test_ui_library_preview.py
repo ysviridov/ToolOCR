@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
 from .gost_r_51506_99 import ENVELOPE_SPECS, EnvelopeFormat
+from .postcode_digit_cells import derive_postcode_digit_geometry
+from .postcode_recognizer import postcode_recognition_to_dict, recognize_postcode_digits
 from .roi import detect_simple_mail_rois
 from .roi_test_ui import SUPPORTED_ROI_FORMATS, _canonical_from_analysis
 from .test_ui import (
@@ -167,12 +169,15 @@ _PREVIEW_SCRIPT = r"""
     const confidence = typeof item.postcode_confidence === 'number'
       ? ` · confidence ${item.postcode_confidence.toFixed(2)}`
       : '';
+    const ocr = item.postcode_ocr_text
+      ? ` · OCR ${item.postcode_ocr_text}`
+      : '';
 
     if (item.postcode_roi_color === 'green') {
-      return `Postcode ROI: strict_start_marker${confidence}`;
+      return `Postcode ROI: strict_start_marker${confidence}${ocr}`;
     }
     if (item.postcode_roi_color === 'yellow') {
-      return `Postcode ROI: seven_bar_rescue${confidence}`;
+      return `Postcode ROI: seven_bar_rescue${confidence}${ocr}`;
     }
     if (item.postcode_roi_color === 'gray') {
       const detectorReason = item.postcode_rejection_reason
@@ -274,6 +279,14 @@ def _empty_postcode_summary(note: str) -> dict[str, Any]:
         "postcode_rejection_reason": None,
         "postcode_roi_color": "white",
         "postcode_roi_note": note,
+        "postcode_ocr_status": "not_evaluated",
+        "postcode_ocr_text": None,
+        "postcode_ocr_postcode": None,
+        "postcode_ocr_confidence": None,
+        "postcode_ocr_min_digit_confidence": None,
+        "postcode_ocr_structurally_valid": False,
+        "postcode_ocr_reason": note,
+        "postcode_ocr_digits": [],
     }
     summary.update(_empty_input_quality())
     return summary
@@ -396,9 +409,17 @@ def _postcode_summary_for_result(result: dict[str, Any]) -> dict[str, Any]:
         postcode = next(
             region for region in roi.regions if region.kind == "recipient_postcode"
         )
+        digit_geometry = derive_postcode_digit_geometry(
+            roi,
+            image_width=int(canonical.image.shape[1]),
+            image_height=int(canonical.image.shape[0]),
+        )
+        recognition = recognize_postcode_digits(canonical.image, digit_geometry)
+        recognition_payload = postcode_recognition_to_dict(recognition)
     except Exception as exc:
-        summary = _empty_postcode_summary(f"ROI evaluation error: {type(exc).__name__}")
+        summary = _empty_postcode_summary(f"ROI/OCR evaluation error: {type(exc).__name__}")
         summary["postcode_rejection_reason"] = str(exc)
+        summary["postcode_ocr_reason"] = str(exc)
         return summary
 
     features = postcode.features or {}
@@ -425,6 +446,14 @@ def _postcode_summary_for_result(result: dict[str, Any]) -> dict[str, Any]:
         "postcode_rejection_reason": rejection_reason,
         "postcode_roi_color": color,
         "postcode_roi_note": None,
+        "postcode_ocr_status": recognition_payload["status"],
+        "postcode_ocr_text": recognition_payload["text"],
+        "postcode_ocr_postcode": recognition_payload["postcode"],
+        "postcode_ocr_confidence": recognition_payload["confidence"],
+        "postcode_ocr_min_digit_confidence": recognition_payload["min_digit_confidence"],
+        "postcode_ocr_structurally_valid": recognition_payload["structurally_valid"],
+        "postcode_ocr_reason": recognition_payload["reason"],
+        "postcode_ocr_digits": recognition_payload["digits"],
     }
     summary.update(input_quality)
     return summary
@@ -432,7 +461,7 @@ def _postcode_summary_for_result(result: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/v1/test-ui/run")
 async def run_test_with_postcode_roi_status(request: TestRunRequest) -> dict[str, Any]:
-    """Расширяет batch-test postcode ROI и диагностикой качества входа."""
+    """Расширяет batch-test postcode ROI, OCR и диагностикой качества входа."""
 
     payload = await _base_run_test(request)
     for result in payload.get("results", []):
@@ -449,6 +478,16 @@ async def run_test_with_postcode_roi_status(request: TestRunRequest) -> dict[str
                 "color": summary["postcode_roi_color"],
                 "note": summary["postcode_roi_note"],
             }
+            debug["test_ui_postcode_ocr"] = {
+                "status": summary["postcode_ocr_status"],
+                "text": summary["postcode_ocr_text"],
+                "postcode": summary["postcode_ocr_postcode"],
+                "confidence": summary["postcode_ocr_confidence"],
+                "min_digit_confidence": summary["postcode_ocr_min_digit_confidence"],
+                "structurally_valid": summary["postcode_ocr_structurally_valid"],
+                "reason": summary["postcode_ocr_reason"],
+                "digits": summary["postcode_ocr_digits"],
+            }
             debug["test_ui_input_quality"] = {
                 "status": summary["input_quality_status"],
                 "reasons": summary["input_quality_reasons"],
@@ -460,7 +499,7 @@ async def run_test_with_postcode_roi_status(request: TestRunRequest) -> dict[str
 
 @router.get("/test-ui", response_class=HTMLResponse, include_in_schema=False)
 def test_ui_page_with_library_preview() -> HTMLResponse:
-    """Test UI: preview, postcode ROI colors и input-quality diagnostics."""
+    """Test UI: preview, postcode ROI/OCR и input-quality diagnostics."""
 
     try:
         html = HTML_PATH.read_text(encoding="utf-8")
