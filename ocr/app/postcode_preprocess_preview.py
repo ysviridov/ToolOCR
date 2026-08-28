@@ -31,12 +31,13 @@ def append_postcode_preprocess_strip(
     Каждый tile — это тот же 96x128 canvas, который получается после
     `stencil_dot_suppression_v1`, tight glyph crop и нормализации и затем
     передаётся в Tesseract. Никакие промежуточные изображения не сохраняются.
+    Внизу панели резервируется свободная полоса для крупного POSTCODE OCR.
     """
 
     if geometry.status != "ready" or len(geometry.cells) != 6:
         return image
 
-    image_height, image_width = image.shape[:2]
+    _, image_width = image.shape[:2]
     gap = max(14, round(image_width * 0.007))
     side_margin = gap
     usable_width = max(1, image_width - side_margin * 2 - gap * 5)
@@ -44,7 +45,14 @@ def append_postcode_preprocess_strip(
     tile_height = round(tile_width * 128 / 96)
     header_height = max(76, round(tile_height * 0.24))
     footer_height = max(66, round(tile_height * 0.22))
-    panel_height = header_height + tile_height + footer_height + gap * 2
+    summary_reserve_height = max(95, round(tile_height * 0.30))
+    panel_height = (
+        header_height
+        + tile_height
+        + footer_height
+        + summary_reserve_height
+        + gap * 2
+    )
 
     panel = np.full((panel_height, image_width, 3), _PANEL_BG, dtype=np.uint8)
     recognized = _recognized_by_index(recognition)
