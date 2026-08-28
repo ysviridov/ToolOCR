@@ -17,6 +17,12 @@ from .postcode_digit_cells import (
     postcode_digit_cells_to_dict,
     postcode_digit_geometry_to_dict,
 )
+from .postcode_recognizer import (
+    draw_postcode_recognition_summary,
+    postcode_digit_overlay_labels,
+    postcode_recognition_to_dict,
+    recognize_postcode_digits,
+)
 from .roi import canonicalize_rectified, detect_simple_mail_rois, draw_roi_overlay, roi_detection_to_dict
 from .test_ui import _decode_image, _image_path, _load_metadata, _validate_file_id
 
@@ -163,8 +169,15 @@ async def roi_preview(
         image_width=int(canonical.image.shape[1]),
         image_height=int(canonical.image.shape[0]),
     )
+    recognition = recognize_postcode_digits(canonical.image, digit_geometry)
+
     overlay = draw_roi_overlay(canonical.image, roi)
-    draw_postcode_digit_cells(overlay, digit_geometry)
+    draw_postcode_digit_cells(
+        overlay,
+        digit_geometry,
+        labels=postcode_digit_overlay_labels(recognition),
+    )
+    draw_postcode_recognition_summary(overlay, digit_geometry, recognition)
 
     headers = _common_headers(
         analysis,
@@ -177,6 +190,8 @@ async def roi_preview(
             "X-ToolOCR-ROI-Coordinate-Space": roi.coordinate_space,
             "X-ToolOCR-Digit-Geometry": digit_geometry.status,
             "X-ToolOCR-Digit-Cells": str(len(digit_geometry.cells)),
+            "X-ToolOCR-Postcode-OCR-Status": recognition.status,
+            "X-ToolOCR-Postcode-OCR": recognition.text,
         }
     )
     return Response(
@@ -209,12 +224,15 @@ async def roi_metadata(
         image_width=int(canonical.image.shape[1]),
         image_height=int(canonical.image.shape[0]),
     )
+    recognition = recognize_postcode_digits(canonical.image, digit_geometry)
+
     roi_payload = roi_detection_to_dict(roi)
     for region in roi_payload.get("regions", []):
         if region.get("kind") != "recipient_postcode":
             continue
         region["digit_geometry"] = postcode_digit_geometry_to_dict(digit_geometry)
         region["digit_cells"] = postcode_digit_cells_to_dict(digit_geometry)
+        region["recognition"] = postcode_recognition_to_dict(recognition)
         break
 
     return {
@@ -227,5 +245,6 @@ async def roi_metadata(
             "width_px": int(canonical.image.shape[1]),
             "height_px": int(canonical.image.shape[0]),
         },
+        "postcode_recognition": postcode_recognition_to_dict(recognition),
         "roi": roi_payload,
     }
