@@ -16,6 +16,7 @@ _TESSERACT_CONFIG = (
     "-c tessedit_char_whitelist=0123456789 "
     "-c classify_bln_numeric_mode=1"
 )
+_TESSERACT_TIMEOUT_SECONDS = 2.0
 _CANVAS_WIDTH = 96
 _CANVAS_HEIGHT = 128
 _CANVAS_MARGIN = 12
@@ -127,6 +128,7 @@ def _recognize_digit_crop(crop: np.ndarray, index: int) -> DigitRecognition:
             lang="eng",
             config=_TESSERACT_CONFIG,
             output_type=Output.DICT,
+            timeout=_TESSERACT_TIMEOUT_SECONDS,
         )
     except Exception as exc:  # TesseractNotFoundError / timeout / subprocess failure
         return DigitRecognition(
@@ -269,14 +271,10 @@ def postcode_recognition_to_dict(result: PostcodeRecognition) -> dict[str, Any]:
 
 
 def postcode_digit_overlay_labels(result: PostcodeRecognition) -> dict[int, str]:
-    labels: dict[int, str] = {}
-    for item in result.digits:
-        digit = item.digit if item.digit is not None else "?"
-        if item.confidence is None:
-            labels[item.index] = f"D{item.index}={digit}"
-        else:
-            labels[item.index] = f"D{item.index}={digit} {item.confidence:.2f}"
-    return labels
+    return {
+        item.index: f"D{item.index}={item.digit if item.digit is not None else '?'}"
+        for item in result.digits
+    }
 
 
 def draw_postcode_recognition_summary(
@@ -293,7 +291,6 @@ def draw_postcode_recognition_summary(
     font_scale = max(0.55, 0.68 * scale)
     thickness = max(1, round(2.0 * scale))
     first = geometry.cells[0].bbox
-    last = geometry.cells[-1].bbox
     x = first.x
     y = max(24, first.y - max(30, round(34 * scale)))
 
