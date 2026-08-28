@@ -220,15 +220,17 @@ def postcode_digit_cells_to_dict(geometry: PostcodeDigitGeometry) -> list[dict[s
 def draw_postcode_digit_cells(
     image,
     geometry: PostcodeDigitGeometry,
+    *,
+    labels: dict[int, str] | None = None,
 ) -> None:
-    """Рисует 6 ячеек поверх ROI preview для corpus-validation."""
+    """Рисует 6 ячеек и при наличии OCR-подписи поверх ROI preview."""
 
     if geometry.status != "ready":
         return
 
     scale = max(1.0, max(image.shape[:2]) / 1600.0)
     thickness = max(1, round(2.0 * scale))
-    font_scale = max(0.45, 0.52 * scale)
+    font_scale = max(0.42, 0.48 * scale)
     font_thickness = max(1, round(1.5 * scale))
 
     for cell in geometry.cells:
@@ -240,10 +242,11 @@ def draw_postcode_digit_cells(
             _DIGIT_CELL_COLOR_BGR,
             thickness,
         )
+        label = labels.get(cell.index, f"D{cell.index}") if labels else f"D{cell.index}"
         label_y = max(18, rect.y - max(4, round(4 * scale)))
         cv2.putText(
             image,
-            f"D{cell.index}",
+            label,
             (rect.x, label_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
