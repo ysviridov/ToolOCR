@@ -17,6 +17,7 @@ from .postcode_digit_cells import (
     postcode_digit_cells_to_dict,
     postcode_digit_geometry_to_dict,
 )
+from .postcode_preprocess_preview import append_postcode_preprocess_strip
 from .postcode_recognizer import (
     draw_postcode_recognition_summary,
     postcode_digit_overlay_labels,
@@ -178,6 +179,12 @@ async def roi_preview(
         labels=postcode_digit_overlay_labels(recognition),
     )
     draw_postcode_recognition_summary(overlay, digit_geometry, recognition)
+    overlay = append_postcode_preprocess_strip(
+        overlay,
+        canonical.image,
+        digit_geometry,
+        recognition,
+    )
 
     headers = _common_headers(
         analysis,
@@ -192,6 +199,7 @@ async def roi_preview(
             "X-ToolOCR-Digit-Cells": str(len(digit_geometry.cells)),
             "X-ToolOCR-Postcode-OCR-Status": recognition.status,
             "X-ToolOCR-Postcode-OCR": recognition.text,
+            "X-ToolOCR-Preprocess-Preview": "stencil_dot_suppression_v1",
         }
     )
     return Response(
