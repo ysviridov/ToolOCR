@@ -282,23 +282,43 @@ def draw_postcode_recognition_summary(
     geometry: PostcodeDigitGeometry,
     recognition: PostcodeRecognition,
 ) -> None:
-    """Добавляет итоговый OCR postcode над шестью digit-cell."""
+    """Рисует крупный итоговый OCR postcode в правом нижнем углу ROI."""
 
     if geometry.status != "ready" or not geometry.cells:
         return
 
+    image_height, image_width = image.shape[:2]
     scale = max(1.0, max(image.shape[:2]) / 1600.0)
-    font_scale = max(0.55, 0.68 * scale)
-    thickness = max(1, round(2.0 * scale))
-    first = geometry.cells[0].bbox
-    x = first.x
-    y = max(24, first.y - max(30, round(34 * scale)))
+    font_scale = max(1.05, 1.00 * scale)
+    thickness = max(2, round(3.0 * scale))
+    margin = max(18, round(26 * scale))
 
     if recognition.confidence is None:
         label = f"POSTCODE OCR: {recognition.text}"
     else:
         label = f"POSTCODE OCR: {recognition.text}  conf={recognition.confidence:.2f}"
 
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        thickness,
+    )
+    x = max(margin, image_width - margin - text_width)
+    y = max(text_height + margin, image_height - margin - baseline)
+
+    # Тёмный контур делает крупную подпись читаемой и на светлом конверте,
+    # и на тёмных/неравномерно освещённых участках без отдельной плашки.
+    cv2.putText(
+        image,
+        label,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (20, 20, 20),
+        thickness + max(2, round(2.0 * scale)),
+        cv2.LINE_AA,
+    )
     cv2.putText(
         image,
         label,
