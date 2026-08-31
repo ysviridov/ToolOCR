@@ -94,8 +94,8 @@ def test_six_digit_cells_fully_contain_known_digit_bounds():
         assert cell.bbox.y <= digit_top
         assert cell.bbox.y2 >= digit_bottom
 
-    # Ячейки должны идти слева направо и не перекрываться внутренностями.
-    for left_cell, right_cell in zip(geometry.cells, geometry.cells[1:], strict=True):
+    # Здесь намеренно 5 соседних пар из 6 ячеек, поэтому strict=True неприменим.
+    for left_cell, right_cell in zip(geometry.cells, geometry.cells[1:]):
         assert left_cell.bbox.x < right_cell.bbox.x
         assert left_cell.bbox.x2 <= right_cell.bbox.x + 1
 
