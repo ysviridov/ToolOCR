@@ -4,6 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ocr.app.roi import PixelRect
 from scripts.export_postcode_training_dataset import (
     _choose_dataset_splits,
     _extract_one,
@@ -131,33 +132,35 @@ def test_train_val_test_split_is_by_source_file():
     assert train | val | test == {row["filename"] for row in rows}
 
 
-def test_postcode_crop_mode_uses_existing_stencil_and_produces_six_canvases(tmp_path: Path):
+def test_postcode_crop_wrapper_produces_six_canvases(tmp_path: Path, monkeypatch):
     crop = np.full((150, 320, 3), 235, dtype=np.uint8)
-    bar_width = 20
-    bar_height = 8
-    step = 26
-    start_x = 24
-    bar_y = 18
-
-    for position in range(7):
-        x = start_x + position * step
-        cv2.rectangle(crop, (x, bar_y), (x + bar_width - 1, bar_y + bar_height - 1), (20, 20, 20), -1)
-    cv2.rectangle(
-        crop,
-        (start_x, bar_y + 12),
-        (start_x + bar_width - 1, bar_y + 15),
-        (20, 20, 20),
-        -1,
-    )
-
-    start_center = start_x + bar_width / 2.0
-    for digit_index in range(1, 7):
-        center_x = int(round(start_center + digit_index * step))
+    for center_x in (60, 86, 112, 138, 164, 190):
         cv2.line(crop, (center_x, 34), (center_x, 70), (25, 25, 25), 4)
-        cv2.line(crop, (center_x, 70), (center_x + 8, 78), (25, 25, 25), 4)
+        cv2.line(crop, (center_x, 70), (center_x + 8, 76), (25, 25, 25), 4)
 
     path = tmp_path / "postcode.png"
     assert cv2.imwrite(str(path), crop)
+
+    def fake_detector(image, search):
+        assert search.y == 300
+        assert image.shape[:2] == (450, 320)
+        return (
+            PixelRect(21, 310, 190, 70),
+            7,
+            0.05,
+            0.95,
+            {
+                "confirmation_mode": "strict_start_marker",
+                "bar_width_px": 20.0,
+                "bar_step_px": 26.0,
+                "row_y_norm": 320.0 / 450.0,
+            },
+        )
+
+    monkeypatch.setattr(
+        "scripts.export_postcode_training_dataset._postcode_stencil_bbox",
+        fake_detector,
+    )
 
     _, cells, debug = asyncio.run(
         _extract_one(
