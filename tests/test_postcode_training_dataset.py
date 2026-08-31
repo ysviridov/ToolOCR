@@ -16,10 +16,12 @@ from scripts.export_postcode_training_dataset import (
 
 
 def test_ground_truth_minimal_cp1251_semicolon(tmp_path: Path):
+    # ASCII-CSV невозможно однозначно отличить от UTF-8, поэтому в имени
+    # оставляем кириллицу: это реально проверяет fallback декодера на CP1251.
     content = (
         "filename;postcode\r\n"
-        "a.jpg;123456\r\n"
-        "b.jpg;654321\r\n"
+        "письмо-a.jpg;123456\r\n"
+        "письмо-b.jpg;654321\r\n"
     )
     path = tmp_path / "gt.csv"
     path.write_bytes(content.encode("cp1251"))
@@ -29,7 +31,7 @@ def test_ground_truth_minimal_cp1251_semicolon(tmp_path: Path):
 
     assert encoding == "cp1251"
     assert delimiter == ";"
-    assert [item["filename"] for item in valid] == ["a.jpg", "b.jpg"]
+    assert [item["filename"] for item in valid] == ["письмо-a.jpg", "письмо-b.jpg"]
     assert [item["postcode"] for item in valid] == ["123456", "654321"]
     assert skipped == []
 
