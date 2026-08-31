@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import random
@@ -167,7 +168,7 @@ def _choose_dataset_splits(
     filenames = [row["filename"] for row in rows]
     count = len(filenames)
     if count < 3:
-        raise ValueError("Для train/val/test нужны минимум 3 письма")
+        raise ValueError("Для train/val/test нужны минимум 3 успешно извлечённых письма")
 
     val_size = max(1, round(count * val_fraction))
     test_size = max(1, round(count * test_fraction))
@@ -387,15 +388,10 @@ async def export_dataset(args: argparse.Namespace) -> int:
         raise RuntimeError("После валидации ground truth не осталось строк")
 
     by_relative, unique_basename, duplicate_basenames = _index_images(images_dir)
-    split_by_filename = _choose_dataset_splits(
-        valid_rows,
-        val_fraction=args.val_fraction,
-        test_fraction=args.test_fraction,
-        seed=args.seed,
-    )
     expected_format = None if args.expected_format == "auto" else EnvelopeFormat(args.expected_format)
 
     manifest: list[dict[str, Any]] = []
+    successful_rows: list[dict[str, str]] = []
     failures: list[dict[str, Any]] = []
 
     for current, row in enumerate(valid_rows, start=1):
@@ -429,15 +425,14 @@ async def export_dataset(args: argparse.Namespace) -> int:
             )
             continue
 
-        split = split_by_filename[filename]
-        stem = Path(filename).stem
+        source_id = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
         sample_rows: list[dict[str, Any]] = []
         sample_paths: list[Path] = []
         complete = True
 
         for digit_index, canvas, preprocess in cells:
             label = postcode[digit_index - 1]
-            relative = Path("samples") / f"{stem}__d{digit_index}__y{label}.png"
+            relative = Path("samples") / f"{source_id}__d{digit_index}__y{label}.png"
             target = output_dir / relative
             if not cv2.imwrite(str(target), canvas):
                 complete = False
@@ -451,7 +446,7 @@ async def export_dataset(args: argparse.Namespace) -> int:
                     "filename": filename,
                     "digit_index": digit_index,
                     "label": label,
-                    "split": split,
+                    "split": "",
                     "sample_path": relative.as_posix(),
                     "input_mode": args.input_mode,
                     "preprocess_status": preprocess.get("status"),
@@ -466,9 +461,25 @@ async def export_dataset(args: argparse.Namespace) -> int:
                 target.unlink(missing_ok=True)
             continue
         manifest.extend(sample_rows)
+        successful_rows.append(row)
 
     if not manifest:
         raise RuntimeError("Не удалось экспортировать ни одной digit-cell")
+    if len(successful_rows) < 3:
+        raise RuntimeError(
+            "После извлечения осталось меньше 3 писем; невозможно построить train/val/test"
+        )
+
+    # Split строится только по реально пригодным письмам. Поэтому failures
+    # layout/orientation не могут случайно опустошить validation или test.
+    split_by_filename = _choose_dataset_splits(
+        successful_rows,
+        val_fraction=args.val_fraction,
+        test_fraction=args.test_fraction,
+        seed=args.seed,
+    )
+    for row in manifest:
+        row["split"] = split_by_filename[str(row["filename"])]
 
     _write_manifest(output_dir / "manifest.csv", manifest)
     successful_files = {row["filename"] for row in manifest}
