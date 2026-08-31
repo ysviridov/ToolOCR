@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 IMAGE_WIDTH = 96
 IMAGE_HEIGHT = 128
 NUM_CLASSES = 10
+ALLOWED_SPLITS = {"train", "val", "test"}
 
 
 @dataclass(frozen=True)
@@ -59,8 +60,8 @@ def _load_manifest(path: Path) -> list[Sample]:
                 raise ValueError(f"manifest.csv:{line}: digit_index должен быть 1..6")
             if not (0 <= label <= 9):
                 raise ValueError(f"manifest.csv:{line}: label должен быть 0..9")
-            if split not in {"train", "val"}:
-                raise ValueError(f"manifest.csv:{line}: split должен быть train/val")
+            if split not in ALLOWED_SPLITS:
+                raise ValueError(f"manifest.csv:{line}: split должен быть train/val/test")
             sample_path = (root / str(row["sample_path"])).resolve()
             if not sample_path.is_file():
                 raise FileNotFoundError(f"manifest.csv:{line}: sample не найден: {sample_path}")
@@ -79,12 +80,6 @@ def _load_manifest(path: Path) -> list[Sample]:
 
 
 def _augment(binary_canvas: np.ndarray, rng: random.Random) -> np.ndarray:
-    """Мягкая аугментация рукописного glyph после suppression.
-
-    Сохраняем семантику цифры: небольшая геометрия, вариация толщины штриха
-    и редкие остаточные точки шаблона. Canvas остаётся 96x128.
-    """
-
     image = binary_canvas.copy()
     center = (IMAGE_WIDTH / 2.0, IMAGE_HEIGHT / 2.0)
     angle = rng.uniform(-7.0, 7.0)
@@ -103,16 +98,12 @@ def _augment(binary_canvas: np.ndarray, rng: random.Random) -> np.ndarray:
 
     morph = rng.random()
     if morph < 0.18:
-        kernel = np.ones((2, 2), dtype=np.uint8)
-        image = cv2.erode(image, kernel, iterations=1)
+        image = cv2.erode(image, np.ones((2, 2), dtype=np.uint8), iterations=1)
     elif morph < 0.36:
-        kernel = np.ones((2, 2), dtype=np.uint8)
-        image = cv2.dilate(image, kernel, iterations=1)
+        image = cv2.dilate(image, np.ones((2, 2), dtype=np.uint8), iterations=1)
 
-    # Иногда оставляем несколько точек, похожих на остаток stencil-template.
     if rng.random() < 0.35:
-        count = rng.randint(1, 7)
-        for _ in range(count):
+        for _ in range(rng.randint(1, 7)):
             x = rng.randint(5, IMAGE_WIDTH - 6)
             y = rng.randint(5, IMAGE_HEIGHT - 6)
             radius = 1 if rng.random() < 0.85 else 2
@@ -144,7 +135,6 @@ class DigitDataset(Dataset):
             rng = random.Random(self.seed + self.epoch * 1_000_003 + index * 7_919)
             image = _augment(image, rng)
 
-        # Белый фон -> 0, чёрный ink -> 1.
         tensor = torch.from_numpy((255.0 - image.astype(np.float32)) / 255.0).unsqueeze(0)
         return tensor, sample.label, sample.filename, sample.digit_index
 
@@ -185,7 +175,6 @@ def _class_weights(samples: list[Sample], device: torch.device) -> torch.Tensor:
     weights = []
     for digit in range(NUM_CLASSES):
         count = max(1, counts[digit])
-        # sqrt-balanced: помогает редким 8/6, но не даёт им доминировать.
         value = math.sqrt(total / (NUM_CLASSES * count))
         weights.append(min(3.0, max(0.55, value)))
     return torch.tensor(weights, dtype=torch.float32, device=device)
@@ -272,7 +261,11 @@ def _export_onnx(model: nn.Module, output_path: Path) -> None:
     )
 
 
-def _validate_onnx_with_opencv(model: nn.Module, onnx_path: Path, sample_path: Path) -> dict[str, Any]:
+def _validate_onnx_with_opencv(
+    model: nn.Module,
+    onnx_path: Path,
+    sample_path: Path,
+) -> dict[str, Any]:
     image = cv2.imread(str(sample_path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise RuntimeError(f"Не удалось прочитать validation sample: {sample_path}")
@@ -296,6 +289,12 @@ def _validate_onnx_with_opencv(model: nn.Module, onnx_path: Path, sample_path: P
     }
 
 
+def _public_metrics(metrics: dict[str, Any] | None) -> dict[str, Any] | None:
+    if metrics is None:
+        return None
+    return {key: value for key, value in metrics.items() if key != "confusion"}
+
+
 def train(args: argparse.Namespace) -> int:
     _set_seed(args.seed)
     manifest_path = Path(args.manifest).resolve()
@@ -305,24 +304,34 @@ def train(args: argparse.Namespace) -> int:
     all_samples = _load_manifest(manifest_path)
     train_samples = [sample for sample in all_samples if sample.split == "train"]
     val_samples = [sample for sample in all_samples if sample.split == "val"]
+    test_samples = [sample for sample in all_samples if sample.split == "test"]
     if not train_samples or not val_samples:
         raise RuntimeError("Нужны непустые train и val split")
 
-    train_files = {sample.filename for sample in train_samples}
-    val_files = {sample.filename for sample in val_samples}
-    overlap = train_files.intersection(val_files)
-    if overlap:
-        raise RuntimeError(f"Leakage: письма одновременно в train и val: {sorted(overlap)[:5]}")
+    split_files = {
+        "train": {sample.filename for sample in train_samples},
+        "val": {sample.filename for sample in val_samples},
+        "test": {sample.filename for sample in test_samples},
+    }
+    if split_files["train"].intersection(split_files["val"]):
+        raise RuntimeError("Leakage: письма одновременно в train и val")
+    if split_files["train"].intersection(split_files["test"]):
+        raise RuntimeError("Leakage: письма одновременно в train и test")
+    if split_files["val"].intersection(split_files["test"]):
+        raise RuntimeError("Leakage: письма одновременно в val и test")
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     print(f"device={device}")
-    print(f"train: files={len(train_files)} digits={len(train_samples)}")
-    print(f"val:   files={len(val_files)} digits={len(val_samples)}")
+    print(f"train: files={len(split_files['train'])} digits={len(train_samples)}")
+    print(f"val:   files={len(split_files['val'])} digits={len(val_samples)}")
+    print(f"test:  files={len(split_files['test'])} digits={len(test_samples)}")
     print("train labels:", dict(sorted(Counter(sample.label for sample in train_samples).items())))
     print("val labels:  ", dict(sorted(Counter(sample.label for sample in val_samples).items())))
+    print("test labels: ", dict(sorted(Counter(sample.label for sample in test_samples).items())))
 
     train_dataset = DigitDataset(train_samples, augment=True, seed=args.seed)
     val_dataset = DigitDataset(val_samples, augment=False, seed=args.seed)
+    test_dataset = DigitDataset(test_samples, augment=False, seed=args.seed)
     generator = torch.Generator().manual_seed(args.seed)
     train_loader = DataLoader(
         train_dataset,
@@ -336,6 +345,16 @@ def train(args: argparse.Namespace) -> int:
         batch_size=max(1, args.batch_size * 2),
         shuffle=False,
         num_workers=0,
+    )
+    test_loader = (
+        DataLoader(
+            test_dataset,
+            batch_size=max(1, args.batch_size * 2),
+            shuffle=False,
+            num_workers=0,
+        )
+        if test_samples
+        else None
     )
 
     model = PostcodeDigitCNN().to(device)
@@ -410,12 +429,8 @@ def train(args: argparse.Namespace) -> int:
             best_score = score
             best_epoch = epoch
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-            best_metrics = {
-                key: value
-                for key, value in val_metrics.items()
-                if key != "confusion"
-            }
-            _write_confusion(output_dir / "confusion_best.csv", val_metrics["confusion"])
+            best_metrics = _public_metrics(val_metrics)
+            _write_confusion(output_dir / "confusion_val_best.csv", val_metrics["confusion"])
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -428,7 +443,19 @@ def train(args: argparse.Namespace) -> int:
         raise RuntimeError("Не удалось выбрать best checkpoint")
 
     model.load_state_dict(best_state)
-    checkpoint_path = output_dir / "postcode_digit_c4.pt"
+    test_metrics = (
+        _evaluate(model, test_loader, criterion, device)
+        if test_loader is not None
+        else None
+    )
+    if test_metrics is not None:
+        _write_confusion(output_dir / "confusion_test.csv", test_metrics["confusion"])
+
+    model_name = args.model_name.strip()
+    if not model_name or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in model_name):
+        raise RuntimeError("--model-name может содержать только A-Z, a-z, 0-9, _ и -")
+
+    checkpoint_path = output_dir / f"{model_name}.pt"
     torch.save(
         {
             "model_state_dict": best_state,
@@ -442,14 +469,14 @@ def train(args: argparse.Namespace) -> int:
         checkpoint_path,
     )
 
-    onnx_path = output_dir / "postcode_digit_c4.onnx"
+    onnx_path = output_dir / f"{model_name}.onnx"
     _export_onnx(model, onnx_path)
     onnx_validation = _validate_onnx_with_opencv(model, onnx_path, val_samples[0].path)
     if not onnx_validation["same_argmax"]:
         raise RuntimeError(f"OpenCV ONNX validation mismatch: {onnx_validation}")
 
     metadata = {
-        "schema": "toolocr.postcode-digit-model.v1",
+        "schema": "toolocr.postcode-digit-model.v2",
         "architecture": "PostcodeDigitCNN.v1",
         "input": {
             "width": IMAGE_WIDTH,
@@ -464,20 +491,25 @@ def train(args: argparse.Namespace) -> int:
             "seed": args.seed,
             "epochs_requested": args.epochs,
             "best_epoch": best_epoch,
-            "train_files": len(train_files),
-            "val_files": len(val_files),
+            "train_files": len(split_files["train"]),
+            "val_files": len(split_files["val"]),
+            "test_files": len(split_files["test"]),
             "train_digits": len(train_samples),
             "val_digits": len(val_samples),
+            "test_digits": len(test_samples),
             "train_distribution": dict(sorted(Counter(sample.label for sample in train_samples).items())),
             "val_distribution": dict(sorted(Counter(sample.label for sample in val_samples).items())),
+            "test_distribution": dict(sorted(Counter(sample.label for sample in test_samples).items())),
             "class_weights": [round(float(value), 6) for value in weights.detach().cpu().tolist()],
         },
         "best_validation": best_metrics,
+        "final_test": _public_metrics(test_metrics),
         "onnx_validation": onnx_validation,
         "artifacts": {
             "pytorch": checkpoint_path.name,
             "onnx": onnx_path.name,
-            "confusion": "confusion_best.csv",
+            "validation_confusion": "confusion_val_best.csv",
+            "test_confusion": "confusion_test.csv" if test_metrics is not None else None,
         },
     }
     (output_dir / "metrics.json").write_text(
@@ -489,8 +521,10 @@ def train(args: argparse.Namespace) -> int:
         writer.writeheader()
         writer.writerows(history)
 
-    print("\nBEST")
+    print("\nBEST VALIDATION")
     print(json.dumps(metadata["best_validation"], ensure_ascii=False, indent=2))
+    print("\nFINAL TEST")
+    print(json.dumps(metadata["final_test"], ensure_ascii=False, indent=2))
     print("ONNX", json.dumps(onnx_validation, ensure_ascii=False))
     print(f"model={onnx_path}")
     return 0
@@ -500,12 +534,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Обучение CNN для 6-значного stencil postcode")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--model-name", default="postcode_digit_v1")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--min-epochs", type=int, default=20)
     parser.add_argument("--patience", type=int, default=14)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=20260828)
+    parser.add_argument("--seed", type=int, default=20260831)
     parser.add_argument("--cpu", action="store_true")
     return parser
 
