@@ -249,7 +249,7 @@ async def export_mixed_dataset(args: argparse.Namespace) -> int:
             "indexed_images": len(crop_by_relative),
             "duplicate_basenames": crop_duplicate_basenames,
             "naming": "<source_stem>_crop.<supported_ext>",
-            "adapter": "postcode_crop_virtual_canonical_v1",
+            "adapter": "postcode_crop_virtual_canonical_v2",
         },
         "dataset": {
             "input_mode": "full-envelope+postcode-crop-fallback",
