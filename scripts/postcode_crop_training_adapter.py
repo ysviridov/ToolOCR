@@ -30,7 +30,10 @@ _TRAINING_TARGET_BAR_WIDTH_RATIO = 0.042
 # Training-only pre-detector anchors. Он намеренно мягче production detector:
 # его задача — только геометрическая нормализация tight crop, а окончательное
 # подтверждение stencil всё равно выполняет штатный _postcode_stencil_bbox().
-_ANCHOR_DARK_THRESHOLD_MIN = 190.0
+# После локальной photometric-нормализации бледная плашка может подняться до
+# ~205-212, поэтому training-only floor держим на 215. Геометрические фильтры
+# по размеру/аспекту/регулярности не дают этому порогу стать подтверждением ROI.
+_ANCHOR_DARK_THRESHOLD_MIN = 215.0
 _ANCHOR_TOP_ZONE_MAX = 0.50
 _ANCHOR_WIDTH_MIN_RATIO = 0.035
 _ANCHOR_WIDTH_MAX_RATIO = 0.16
@@ -74,7 +77,7 @@ def _anchor_candidates(crop: np.ndarray) -> tuple[list[AnchorCandidate], float]:
     )
     # Faded/scanned crop может иметь светлую первую плашку '='. Для training
     # deskew она всё равно является полезным anchor, поэтому порог не даём
-    # опускаться ниже 190. Production detector после deskew остаётся строгим.
+    # опускаться ниже 215. Production detector после deskew остаётся строгим.
     dark_threshold = float(max(_ANCHOR_DARK_THRESHOLD_MIN, otsu_threshold))
     dark_threshold = min(215.0, dark_threshold)
     binary = np.where(gray < dark_threshold, 255, 0).astype(np.uint8)
