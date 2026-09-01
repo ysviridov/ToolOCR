@@ -72,8 +72,12 @@ services:
       ORIENTATION_TEXT_OSD_MAX_SIDE: ${ORIENTATION_TEXT_OSD_MAX_SIDE:-1800}
       TEST_UI_STORAGE_DIR: ${TEST_UI_STORAGE_DIR:-/app/test-data}
       TEST_UI_MAX_FILES_PER_RUN: ${TEST_UI_MAX_FILES_PER_RUN:-100}
+      POSTCODE_RECOGNIZER_ENGINE: ${POSTCODE_RECOGNIZER_ENGINE:-onnx}
+      POSTCODE_ONNX_MODEL: ${POSTCODE_ONNX_MODEL:-/app/models/postcode_digit_v1.onnx}
+      POSTCODE_ONNX_FALLBACK_TESSERACT: ${POSTCODE_ONNX_FALLBACK_TESSERACT:-1}
     volumes:
       - ./config:/app/config:ro
+      - ./models:/app/models:ro
       - toolocr_testdata:/app/test-data
     ports:
       - "${TOOLOCR_OCR_PORT:-8090}:8090"
