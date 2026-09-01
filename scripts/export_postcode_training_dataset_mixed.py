@@ -22,6 +22,7 @@ from scripts.export_postcode_training_dataset import (
     _validate_training_rows,
     _write_manifest,
 )
+from scripts.postcode_crop_training_adapter import extract_postcode_crop_cells
 
 
 def _crop_candidate_names(filename: str) -> list[str]:
@@ -86,11 +87,7 @@ async def _extract_with_fallback(
 
     if crop_path is not None:
         try:
-            _, cells, _ = await _extract_one(
-                crop_path,
-                input_mode="postcode-crop",
-                expected_format=None,
-            )
+            cells, _ = extract_postcode_crop_cells(crop_path)
             return cells, "postcode-crop-fallback", None
         except Exception as exc:
             fallback_reason = f"{type(exc).__name__}: {exc}"
@@ -233,7 +230,7 @@ async def export_mixed_dataset(args: argparse.Namespace) -> int:
 
     _write_manifest(output_dir / "manifest.csv", manifest)
     summary = {
-        "schema": "toolocr.postcode-digit-dataset.v3",
+        "schema": "toolocr.postcode-digit-dataset.v4",
         "ground_truth": {
             "path": str(ground_truth_path),
             "encoding": encoding,
@@ -252,6 +249,7 @@ async def export_mixed_dataset(args: argparse.Namespace) -> int:
             "indexed_images": len(crop_by_relative),
             "duplicate_basenames": crop_duplicate_basenames,
             "naming": "<source_stem>_crop.<supported_ext>",
+            "adapter": "postcode_crop_virtual_canonical_v1",
         },
         "dataset": {
             "input_mode": "full-envelope+postcode-crop-fallback",
