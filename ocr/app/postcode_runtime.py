@@ -9,7 +9,6 @@ import numpy as np
 
 from .postcode_digit_cells import PostcodeDigitGeometry
 from .postcode_onnx import (
-    PostcodeOnnxError,
     configured_onnx_model_path,
     configured_recognizer_engine,
     load_configured_onnx_net,
@@ -99,19 +98,16 @@ def _aggregate_engine(
     *,
     model_path: Path,
     onnx_requested: bool,
-    initial_onnx_error: str | None,
+    onnx_fallback_used: bool,
 ) -> str:
     if used_engines == {"onnx"}:
         return onnx_engine_label(model_path)
     if used_engines == {"tesseract_single_digit"}:
-        if onnx_requested and initial_onnx_error:
+        if onnx_requested and onnx_fallback_used:
             return "tesseract_fallback_from_onnx+stencil_dot_suppression_v1"
         return _TESSERACT_ENGINE
     if "onnx" in used_engines and "tesseract_single_digit" in used_engines:
-        return (
-            f"{onnx_engine_label(model_path)}"
-            "+tesseract_fallback"
-        )
+        return f"{onnx_engine_label(model_path)}+tesseract_fallback"
     if onnx_requested:
         return onnx_engine_label(model_path)
     return _TESSERACT_ENGINE
@@ -172,16 +168,21 @@ def recognize_postcode_digits(
 
     net = None
     initial_onnx_error: str | None = None
-    fallback_enabled = tesseract_fallback_enabled()
+    # auto по определению разрешает Tesseract, если ONNX недоступен. Для
+    # явного onnx это поведение регулируется отдельной переменной.
+    fallback_enabled = tesseract_fallback_enabled() or mode == "auto"
+    onnx_fallback_used = False
 
     if onnx_requested:
         if mode == "auto" and not model_path.is_file():
             initial_onnx_error = f"ONNX model не найден: {model_path}"
+            onnx_fallback_used = True
         else:
             try:
                 net = load_configured_onnx_net()
             except Exception as exc:
                 initial_onnx_error = f"{type(exc).__name__}: {exc}"
+                onnx_fallback_used = True
 
     digits: list[RuntimeDigitRecognition] = []
     used_engines: set[str] = set()
@@ -214,6 +215,9 @@ def recognize_postcode_digits(
                 digits.append(recognized)
                 continue
             except Exception as exc:
+                onnx_fallback_used = True
+                if initial_onnx_error is None:
+                    initial_onnx_error = f"{type(exc).__name__}: {exc}"
                 if not fallback_enabled:
                     digits.append(
                         RuntimeDigitRecognition(
@@ -278,7 +282,7 @@ def recognize_postcode_digits(
         used_engines,
         model_path=model_path,
         onnx_requested=onnx_requested,
-        initial_onnx_error=initial_onnx_error,
+        onnx_fallback_used=onnx_fallback_used,
     )
     return RuntimePostcodeRecognition(
         status=status,
