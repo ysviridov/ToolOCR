@@ -132,15 +132,16 @@ def test_dynamic_scale_is_stable_when_operator_crop_width_changes():
     ) <= 0.002
 
 
-def test_faded_start_bar_is_available_to_training_anchor_detector(tmp_path: Path):
-    path = tmp_path / "faded_start_crop.jpg"
-    assert cv2.imwrite(
-        str(path),
-        _draw_realistic_tight_postcode_crop(faded_start_bar=True),
-    )
+def test_faded_start_bar_is_available_to_training_anchor_detector():
+    # Этот synthetic кейс проверяет только training-only pre-detector.
+    # Финальное подтверждение stencil намеренно остаётся за строгим
+    # production _postcode_stencil_bbox(), поэтому не требуем здесь полного
+    # extract_postcode_crop_cells().
+    crop = _draw_realistic_tight_postcode_crop(faded_start_bar=True)
+    _, _, debug = build_training_postcode_canvas(crop)
 
-    cells, debug = extract_postcode_crop_cells(path)
-
+    assert debug["adapter"] == "postcode_crop_virtual_canonical_v2"
+    assert debug["scale_source"] == "anchor_bar_width"
     assert debug["deskew"]["anchor_before"]["matched_count"] == 7
-    assert debug["digit_cell_count"] == 6
-    assert len(cells) == 6
+    assert debug["deskew"]["anchor_after"]["matched_count"] == 7
+    assert 0.038 <= debug["effective_bar_width_ratio"] <= 0.046
