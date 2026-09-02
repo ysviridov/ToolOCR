@@ -17,6 +17,7 @@ install_layout_debug_metadata(_layout_api)
 from .layout_api import router as layout_router
 from . import postcode_runtime as _postcode_runtime
 from . import roi_test_ui as _roi_test_ui
+from . import test_ui_postcode_runtime as _test_ui_postcode_runtime
 from .test_ui import router as test_ui_router
 from .test_ui_library_preview import router as test_ui_library_preview_router
 
@@ -32,6 +33,10 @@ roi_test_ui_router = _roi_test_ui.router
 
 
 app.include_router(layout_router)
+# Актуальный batch /v1/test-ui/run должен быть зарегистрирован первым: FastAPI
+# выбирает первый совпавший route. Он делегирует существующей диагностике ROI,
+# но принудительно использует тот же ONNX-primary postcode runtime, что /roi/meta.
+app.include_router(_test_ui_postcode_runtime.router)
 # Расширенный /test-ui подключаем раньше базового route: FastAPI использует
 # первый совпавший маршрут. Остальные API-маршруты test_ui_router остаются без изменений.
 app.include_router(test_ui_library_preview_router)
