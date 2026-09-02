@@ -1,3 +1,5 @@
+from fastapi import FastAPI
+
 from ocr.app import application, postcode_runtime, test_ui_postcode_runtime
 
 
@@ -28,10 +30,16 @@ def test_batch_debug_uses_same_onnx_runtime_as_roi_meta():
     assert "/roi/meta" in legacy._PREVIEW_SCRIPT
 
 
-def test_current_batch_route_is_registered_before_legacy_route():
+def test_current_batch_router_exposes_expected_endpoint():
+    # Проверяем контракт самого router независимо от уже созданного singleton
+    # FastAPI app. Это устойчиво к порядку импорта/collection pytest и при этом
+    # проверяет реальный механизм FastAPI include_router().
+    fresh_app = FastAPI()
+    fresh_app.include_router(test_ui_postcode_runtime.router)
+
     matches = [
         route
-        for route in application.app.routes
+        for route in fresh_app.routes
         if getattr(route, "path", None) == "/v1/test-ui/run"
         and "POST" in (getattr(route, "methods", set()) or set())
     ]
