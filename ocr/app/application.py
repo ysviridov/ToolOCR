@@ -19,6 +19,7 @@ from . import postcode_runtime as _postcode_runtime
 from . import roi_test_ui as _roi_test_ui
 from . import test_ui_postcode_runtime as _test_ui_postcode_runtime
 from . import test_ui_diagnostics as _test_ui_diagnostics  # noqa: F401
+from . import test_ui_diagnostics_refinements as _test_ui_diagnostics_refinements  # noqa: F401
 from .test_ui import router as test_ui_router
 from .test_ui_library_preview import router as test_ui_library_preview_router
 
