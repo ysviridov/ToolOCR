@@ -22,6 +22,7 @@ from . import test_ui_diagnostics as _test_ui_diagnostics  # noqa: F401
 from . import test_ui_diagnostics_refinements as _test_ui_diagnostics_refinements  # noqa: F401
 from . import test_ui_diagnostics_layout_v3 as _test_ui_diagnostics_layout_v3  # noqa: F401
 from .test_ui import router as test_ui_router
+from .recipient_annotation_ui import router as recipient_annotation_router
 from .test_ui_library_preview import router as test_ui_library_preview_router
 
 # Stage 2.2 runtime wiring. ROI/Test UI исторически импортировал функции
@@ -44,4 +45,5 @@ app.include_router(_test_ui_postcode_runtime.router)
 # первый совпавший маршрут. Остальные API-маршруты test_ui_router остаются без изменений.
 app.include_router(test_ui_library_preview_router)
 app.include_router(test_ui_router)
+app.include_router(recipient_annotation_router)
 app.include_router(roi_test_ui_router)
