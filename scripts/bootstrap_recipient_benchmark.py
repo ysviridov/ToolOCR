@@ -8,6 +8,8 @@ from pathlib import Path
 
 import cv2
 
+# application устанавливает те же layout/orientation hooks, что production OCR service.
+from ocr.app import application as _application  # noqa: F401
 from ocr.app.format_modes import FormatMode
 from ocr.app.gost_r_51506_99 import EnvelopeFormat
 from ocr.app.roi import detect_simple_mail_rois
