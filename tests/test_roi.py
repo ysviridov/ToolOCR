@@ -155,6 +155,18 @@ def test_row_first_association_ignores_same_x_horizontal_distractors():
     assert postcode.features["row_y_spread_px"] <= postcode.features["row_tolerance_px"] * 2
 
 
+def test_strict_start_marker_accepts_six_bars_with_real_start_marker():
+    image = np.full((900, 1300, 3), 225, dtype=np.uint8)
+    _draw_postcode_stencil(image, x=42, y=760, bar_width=42, bar_count=6)
+
+    postcode = _postcode_region(image, EnvelopeFormat.C4)
+
+    assert postcode.status == "stencil_detected"
+    assert postcode.features is not None
+    assert postcode.features["confirmation_mode"] == "strict_start_marker"
+    assert postcode.features["bar_count"] == 6
+
+
 def test_seven_bar_rescue_accepts_full_regular_row_without_start_marker():
     image = np.full((900, 1300, 3), 225, dtype=np.uint8)
     _draw_postcode_stencil(

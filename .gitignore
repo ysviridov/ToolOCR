@@ -3,6 +3,7 @@ data/incoming/*.zip
 !data/incoming/.gitkeep
 config/camera-calibration.json
 __pycache__/
+.venv/
 *.pyc
 .pytest_cache/
 .toolocr-training/

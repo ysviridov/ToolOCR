@@ -476,7 +476,15 @@ def _postcode_stencil_bbox(
 
                 start_bar = matched[0]
                 start_marker_score = 0.0
-                if start_bar is not None:
+                # A six-bar suffix of a complete row is not a new stencil:
+                # the first digit's horizontal stroke can imitate the lower
+                # half of '='. Keep genuine six-bar strict candidates when
+                # there is no preceding bar on the same regular grid.
+                shifted_suffix = matched[-1] is None and any(
+                    abs(_bar_center_x(item) - (first_center - step)) <= 0.28 * step
+                    for item in row
+                )
+                if start_bar is not None and not shifted_suffix:
                     for candidate in candidates:
                         if candidate == start_bar:
                             continue
